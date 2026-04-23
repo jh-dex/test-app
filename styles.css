@@ -1,0 +1,145 @@
+:root {
+  --bg: #f6f8fc;
+  --card: #ffffff;
+  --primary: #3451ff;
+  --text: #161a2b;
+  --muted: #6f768f;
+  --line: #e8ebf6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+}
+
+.header {
+  margin-bottom: 1rem;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+
+.header p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.goal-form {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.goal-form input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.72rem 0.8rem;
+  font-size: 0.95rem;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--primary);
+  color: white;
+  cursor: pointer;
+  padding: 0.72rem 0.9rem;
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.filter-btn {
+  background: #edf1ff;
+  color: #30409f;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.filter-btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.goal-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.goal-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding: 0.68rem 0;
+}
+
+.goal-item:last-child {
+  border-bottom: 0;
+}
+
+.goal-item label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.goal-item.done .goal-text {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.delete-btn,
+.ghost-btn {
+  background: #f2f4fb;
+  color: #4a536d;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.65rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
