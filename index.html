@@ -3,47 +3,63 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Focus Sprint MVP</title>
+    <title>Live Board MVP</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="container">
-      <header class="header">
-        <h1>Focus Sprint</h1>
-        <p>가벼운 하루 목표 관리 MVP</p>
-      </header>
+    <header class="topbar">
+      <div>
+        <h1>Live Board MVP</h1>
+        <p>Figma 느낌의 웹 기반 실시간 작업 화면 초안</p>
+      </div>
+      <div class="presence" id="presence"></div>
+    </header>
 
-      <section class="card">
-        <form id="goal-form" class="goal-form">
-          <label for="goal-input" class="sr-only">목표 입력</label>
-          <input id="goal-input" type="text" placeholder="예: 운동 30분" maxlength="80" required />
-          <button type="submit">추가</button>
-        </form>
-        <div class="filters">
-          <button class="filter-btn active" data-filter="all">전체</button>
-          <button class="filter-btn" data-filter="active">진행중</button>
-          <button class="filter-btn" data-filter="done">완료</button>
+    <main class="layout">
+      <aside class="panel">
+        <h2>도구</h2>
+        <label>
+          이름
+          <input id="displayName" maxlength="20" placeholder="닉네임" />
+        </label>
+
+        <div class="tool-row">
+          <button data-tool="pen" class="is-active">펜</button>
+          <button data-tool="eraser">지우개</button>
         </div>
-      </section>
 
-      <section class="card">
-        <ul id="goal-list" class="goal-list" aria-live="polite"></ul>
-        <div class="summary">
-          <span id="summary-text">총 0개 · 완료 0개</span>
-          <button id="clear-done-btn" class="ghost-btn">완료 항목 정리</button>
+        <label>
+          색상
+          <input id="colorPicker" type="color" value="#4f46e5" />
+        </label>
+
+        <label>
+          브러시 크기
+          <input id="brushSize" type="range" min="1" max="30" value="4" />
+        </label>
+
+        <label class="upload">
+          이미지 올리기
+          <input id="imageInput" type="file" accept="image/*" />
+        </label>
+
+        <div class="tool-row">
+          <button id="clearCanvas">스케치 지우기</button>
+          <button id="resetBoard" class="danger">보드 초기화</button>
+        </div>
+
+        <p class="hint">
+          같은 브라우저에서 탭을 여러 개 열면 BroadcastChannel 기반으로 실시간 동기화가 됩니다.
+        </p>
+      </aside>
+
+      <section class="board-wrap">
+        <div id="board" class="board">
+          <div id="imageLayer" class="image-layer"></div>
+          <canvas id="drawCanvas"></canvas>
         </div>
       </section>
     </main>
-
-    <template id="goal-item-template">
-      <li class="goal-item">
-        <label>
-          <input type="checkbox" class="goal-toggle" />
-          <span class="goal-text"></span>
-        </label>
-        <button class="delete-btn" aria-label="목표 삭제">삭제</button>
-      </li>
-    </template>
 
     <script src="app.js"></script>
   </body>
