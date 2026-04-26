@@ -216,7 +216,15 @@ function getImagePayload(id) {
     x: Number(item.dataset.x || 0),
     y: Number(item.dataset.y || 0),
     width: Number(item.dataset.width || 200),
+    z: Number(item.dataset.z || 0),
   };
+}
+
+function syncImageZIndices() {
+  [...imageLayer.querySelectorAll('.image-item')].forEach((item, index) => {
+    item.dataset.z = String(index);
+    item.style.zIndex = String(index);
+  });
 }
 
 function setSelectedImage(id) {
@@ -228,6 +236,7 @@ function setSelectedImage(id) {
 
 function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false } = {}) {
   let item = getImageItem(id);
+  const isNew = !item;
   if (!item) {
     item = document.createElement('div');
     item.className = 'image-item';
@@ -243,7 +252,6 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
     handle.setAttribute('aria-label', '이미지 크기 조절');
 
     item.append(img, handle);
-    imageLayer.appendChild(item);
   }
 
   const safeWidth = clamp(width, 40, WORLD.width);
@@ -258,6 +266,10 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
 
   const img = item.querySelector('img');
   if (img && src) img.src = src;
+  if (isNew) {
+    imageLayer.appendChild(item);
+  }
+  syncImageZIndices();
   setSelectedImage(id);
 
   if (!silent) {
@@ -272,6 +284,7 @@ function removeImage(id, { silent = false } = {}) {
   if (selectedImageId === id) {
     setSelectedImage(null);
   }
+  syncImageZIndices();
   if (!silent) {
     broadcast('image-remove', { id });
   }
@@ -286,6 +299,7 @@ function serializeImages() {
       x: Number(item.dataset.x || 0),
       y: Number(item.dataset.y || 0),
       width: Number(item.dataset.width || 200),
+      z: Number(item.dataset.z || 0),
     };
   });
 }
@@ -470,6 +484,35 @@ function pointerUp(event) {
   lastPoint = null;
 }
 
+function broadcastImageOrder() {
+  const order = [...imageLayer.querySelectorAll('.image-item')].map((item) => item.dataset.id);
+  broadcast('image-order', { order });
+}
+
+function moveSelectedImageLayer(direction) {
+  if (!selectedImageId) return;
+  const item = getImageItem(selectedImageId);
+  if (!item) return;
+
+  if (direction === 'front') {
+    imageLayer.appendChild(item);
+  } else if (direction === 'back') {
+    imageLayer.prepend(item);
+  } else if (direction === 'forward') {
+    const next = item.nextElementSibling;
+    if (!next) return;
+    imageLayer.insertBefore(next, item);
+  } else if (direction === 'backward') {
+    const prev = item.previousElementSibling;
+    if (!prev) return;
+    imageLayer.insertBefore(item, prev);
+  }
+
+  syncImageZIndices();
+  broadcastImageOrder();
+  pushHistory(`reorder-image-${direction}`);
+}
+
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
@@ -565,6 +608,26 @@ window.addEventListener('keydown', (event) => {
       pushHistory('paste-image');
       setSelectedImage(duplicated.id);
     }
+    return;
+  }
+
+  if (event.key === ']' && selectedImageId) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      moveSelectedImageLayer('front');
+    } else {
+      moveSelectedImageLayer('forward');
+    }
+    return;
+  }
+
+  if (event.key === '[' && selectedImageId) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      moveSelectedImageLayer('back');
+    } else {
+      moveSelectedImageLayer('backward');
+    }
   }
 });
 
@@ -643,7 +706,13 @@ board.addEventListener('drop', (event) => {
 window.addEventListener('paste', (event) => {
   if (isTypingTarget(event.target)) return;
 
-  const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith('image/'));
+  const itemFiles = [...(event.clipboardData?.items || [])]
+    .filter((item) => item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  const files = [...(event.clipboardData?.files || []), ...itemFiles].filter((file) =>
+    file.type.startsWith('image/'),
+  );
   if (!files.length) return;
 
   event.preventDefault();
@@ -672,6 +741,7 @@ resetBoardBtn.addEventListener('click', () => {
   drawingOps = [];
   renderDrawingFromOps();
   imageLayer.innerHTML = '';
+  syncImageZIndices();
   setSelectedImage(null);
   broadcast('reset-all');
   pushHistory('reset-board');
@@ -702,10 +772,18 @@ channel.onmessage = (event) => {
     drawingOps = [];
     renderDrawingFromOps();
     imageLayer.innerHTML = '';
+    syncImageZIndices();
     setSelectedImage(null);
   }
   if (type === 'image-update') placeImage(payload, { silent: true });
   if (type === 'image-remove') removeImage(payload.id, { silent: true });
+  if (type === 'image-order' && payload?.order) {
+    payload.order.forEach((id) => {
+      const item = getImageItem(id);
+      if (item) imageLayer.appendChild(item);
+    });
+    syncImageZIndices();
+  }
   if (type === 'board-state') restoreBoardState(payload);
 
   if (type === 'presence' && payload?.user) {
