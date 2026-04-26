@@ -1,9 +1,11 @@
 const channel = new BroadcastChannel('live-board-mvp');
 
 const board = document.getElementById('board');
+const viewport = document.getElementById('viewport');
 const canvas = document.getElementById('drawCanvas');
 const ctx = canvas.getContext('2d');
 const imageLayer = document.getElementById('imageLayer');
+const zoomBadge = document.getElementById('zoomBadge');
 const presence = document.getElementById('presence');
 const displayNameInput = document.getElementById('displayName');
 const colorPicker = document.getElementById('colorPicker');
@@ -27,6 +29,7 @@ let activeTool = 'pen';
 let isDrawing = false;
 let lastPoint = null;
 let dragging = null;
+let zoomLevel = 1;
 const peers = new Map();
 
 function resizeCanvas() {
@@ -39,14 +42,28 @@ function resizeCanvas() {
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  viewport.style.width = `${rect.width}px`;
+  viewport.style.height = `${rect.height}px`;
+  updateZoomUI();
 }
 
 function pointFromEvent(event) {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
+    x: (event.clientX - rect.left) / zoomLevel,
+    y: (event.clientY - rect.top) / zoomLevel,
   };
+}
+
+function updateZoomUI() {
+  const zoomText = `${Math.round(zoomLevel * 100)}%`;
+  zoomBadge.textContent = zoomText;
+  viewport.style.transform = `scale(${zoomLevel})`;
+}
+
+function setZoom(nextZoom) {
+  zoomLevel = Math.min(3, Math.max(0.4, nextZoom));
+  updateZoomUI();
 }
 
 function drawSegment(segment) {
@@ -124,10 +141,14 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }) {
 
 function pointerDown(event) {
   if (event.target.tagName === 'IMG') {
+    event.preventDefault();
+    event.target.setPointerCapture(event.pointerId);
+    const imgRect = event.target.getBoundingClientRect();
     dragging = {
       id: event.target.dataset.id,
-      offsetX: event.offsetX,
-      offsetY: event.offsetY,
+      pointerId: event.pointerId,
+      offsetX: (event.clientX - imgRect.left) / zoomLevel,
+      offsetY: (event.clientY - imgRect.top) / zoomLevel,
     };
     return;
   }
@@ -137,10 +158,10 @@ function pointerDown(event) {
 }
 
 function pointerMove(event) {
-  if (dragging) {
+  if (dragging && event.pointerId === dragging.pointerId) {
     const rect = board.getBoundingClientRect();
-    const x = event.clientX - rect.left - dragging.offsetX;
-    const y = event.clientY - rect.top - dragging.offsetY;
+    const x = (event.clientX - rect.left) / zoomLevel - dragging.offsetX;
+    const y = (event.clientY - rect.top) / zoomLevel - dragging.offsetY;
     const img = imageLayer.querySelector(`[data-id="${dragging.id}"]`);
     if (img) {
       img.style.left = `${x}px`;
@@ -175,6 +196,16 @@ canvas.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
 imageLayer.addEventListener('pointerdown', pointerDown);
 imageLayer.addEventListener('pointermove', pointerMove);
+board.addEventListener(
+  'wheel',
+  (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const delta = event.deltaY < 0 ? 0.1 : -0.1;
+    setZoom(zoomLevel + delta);
+  },
+  { passive: false }
+);
 
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
@@ -200,20 +231,40 @@ toolButtons.forEach((btn) => {
 imageInput.addEventListener('change', (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
+  importImageFile(file, { x: 30, y: 30 });
+  event.target.value = '';
+});
+
+function importImageFile(file, point = { x: 30, y: 30 }) {
+  if (!file || !file.type.startsWith('image/')) return;
   const reader = new FileReader();
   reader.onload = () => {
     const payload = {
       id: crypto.randomUUID(),
       src: String(reader.result),
-      x: 30,
-      y: 30,
+      x: Math.max(0, point.x),
+      y: Math.max(0, point.y),
       width: 220,
     };
     placeImage(payload);
     broadcast('image-add', payload);
   };
   reader.readAsDataURL(file);
-  event.target.value = '';
+}
+
+board.addEventListener('dragover', (event) => {
+  event.preventDefault();
+});
+
+board.addEventListener('drop', (event) => {
+  event.preventDefault();
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  const rect = board.getBoundingClientRect();
+  importImageFile(file, {
+    x: (event.clientX - rect.left) / zoomLevel - 110,
+    y: (event.clientY - rect.top) / zoomLevel - 60,
+  });
 });
 
 clearCanvasBtn.addEventListener('click', () => {

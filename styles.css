@@ -146,10 +146,29 @@ button.danger {
   background: var(--board);
 }
 
+.board-viewport {
+  position: absolute;
+  inset: 0;
+  transform-origin: top left;
+}
+
 .image-layer,
 canvas {
   position: absolute;
   inset: 0;
+}
+
+.image-layer {
+  pointer-events: none;
+  z-index: 2;
+}
+
+.image-layer img {
+  pointer-events: auto;
+}
+
+canvas {
+  z-index: 1;
 }
 
 .image-layer img {
@@ -162,6 +181,20 @@ canvas {
   box-shadow: 0 6px 20px rgba(15, 23, 42, 0.2);
   cursor: grab;
   user-select: none;
+}
+
+.zoom-badge {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  font-size: 0.72rem;
+  padding: 0.22rem 0.5rem;
+  border-radius: 999px;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid #475569;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
 }
 
 @media (max-width: 960px) {
