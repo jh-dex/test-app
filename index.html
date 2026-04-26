@@ -38,11 +38,6 @@
           <input id="brushSize" type="range" min="1" max="30" value="4" />
         </label>
 
-        <label>
-          브러시 크기
-          <input id="brushSize" type="range" min="1" max="30" value="4" />
-        </label>
-
         <label class="upload">
           이미지 올리기
           <input id="imageInput" type="file" accept="image/*" />
@@ -54,21 +49,11 @@
         </div>
 
         <p class="hint">
-          이미지는 파일을 보드 위로 드래그앤드롭해서 추가하세요. 이미지를 마우스로 자유롭게 이동할 수 있습니다.
           같은 브라우저에서 탭을 여러 개 열면 BroadcastChannel 기반으로 실시간 동기화가 됩니다.
         </p>
       </aside>
 
       <section class="board-wrap">
-        <div id="board" class="board" aria-label="Live board canvas">
-          <div id="imageLayer" class="image-layer"></div>
-          <canvas id="drawCanvas"></canvas>
-          <div class="drop-overlay" id="dropOverlay">이미지를 여기에 놓기</div>
-          <div class="zoom-hud" aria-label="Zoom controls">
-            <button id="zoomOut" type="button" aria-label="Zoom out">-</button>
-            <span id="zoomValue">100%</span>
-            <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
-          </div>
         <div id="board" class="board">
           <div id="imageLayer" class="image-layer"></div>
           <canvas id="drawCanvas"></canvas>
