@@ -14,6 +14,7 @@ const imageInput = document.getElementById('imageInput');
 const clearCanvasBtn = document.getElementById('clearCanvas');
 const resetBoardBtn = document.getElementById('resetBoard');
 const toolButtons = [...document.querySelectorAll('[data-tool]')];
+const layerButtons = [...document.querySelectorAll('[data-layer-action]')];
 
 const WORLD = {
   width: 8000,
@@ -513,6 +514,12 @@ function moveSelectedImageLayer(direction) {
   pushHistory(`reorder-image-${direction}`);
 }
 
+layerButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    moveSelectedImageLayer(btn.dataset.layerAction);
+  });
+});
+
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
@@ -595,19 +602,18 @@ window.addEventListener('keydown', (event) => {
   }
 
   if (loweredKey === 'v') {
+    if (!copiedImagePayload) return;
     event.preventDefault();
-    if (copiedImagePayload) {
-      const duplicated = {
-        ...copiedImagePayload,
-        id: crypto.randomUUID(),
-        x: copiedImagePayload.x + 24,
-        y: copiedImagePayload.y + 24,
-      };
-      placeImage(duplicated, { silent: true });
-      broadcast('image-update', duplicated);
-      pushHistory('paste-image');
-      setSelectedImage(duplicated.id);
-    }
+    const duplicated = {
+      ...copiedImagePayload,
+      id: crypto.randomUUID(),
+      x: copiedImagePayload.x + 24,
+      y: copiedImagePayload.y + 24,
+    };
+    placeImage(duplicated, { silent: true });
+    broadcast('image-update', duplicated);
+    pushHistory('paste-image');
+    setSelectedImage(duplicated.id);
     return;
   }
 
