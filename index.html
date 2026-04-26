@@ -51,12 +51,20 @@
         <p class="hint">
           같은 브라우저에서 탭을 여러 개 열면 BroadcastChannel 기반으로 실시간 동기화가 됩니다.
         </p>
+        <p class="hint">
+          단축키: Space+드래그/휠클릭 드래그(이동), Ctrl/Cmd+휠 또는 +/- (확대/축소), Ctrl/Cmd+0 (리셋)
+        </p>
       </aside>
 
       <section class="board-wrap">
         <div id="board" class="board">
-          <div id="imageLayer" class="image-layer"></div>
-          <canvas id="drawCanvas"></canvas>
+          <div id="viewport" class="board-viewport">
+            <div id="stage" class="board-stage">
+              <div id="imageLayer" class="image-layer"></div>
+              <canvas id="drawCanvas"></canvas>
+            </div>
+          </div>
+          <div id="zoomBadge" class="zoom-badge">100%</div>
         </div>
       </section>
     </main>
