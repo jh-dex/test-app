@@ -14,6 +14,7 @@ const imageInput = document.getElementById('imageInput');
 const clearCanvasBtn = document.getElementById('clearCanvas');
 const resetBoardBtn = document.getElementById('resetBoard');
 const toolButtons = [...document.querySelectorAll('[data-tool]')];
+const layerButtons = [...document.querySelectorAll('[data-layer-action]')];
 
 const WORLD = {
   width: 8000,
@@ -31,7 +32,7 @@ let me = {
   color: randomColor,
   updatedAt: Date.now(),
 };
-let activeTool = 'pen';
+let activeTool = 'select';
 let isDrawing = false;
 let lastPoint = null;
 let interaction = null;
@@ -101,6 +102,10 @@ function updateCursor() {
   }
   if (isSpacePressed) {
     board.style.cursor = 'grab';
+    return;
+  }
+  if (activeTool === 'select') {
+    board.style.cursor = selectedImageId ? 'move' : 'default';
     return;
   }
   board.style.cursor = activeTool === 'eraser' ? 'cell' : 'crosshair';
@@ -232,6 +237,7 @@ function setSelectedImage(id) {
   imageLayer.querySelectorAll('.image-item').forEach((item) => {
     item.classList.toggle('is-selected', item.dataset.id === id);
   });
+  updateCursor();
 }
 
 function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false } = {}) {
@@ -389,7 +395,7 @@ function pointerDown(event) {
   }
 
   const item = event.target.closest('.image-item');
-  if (item) {
+  if (item && activeTool === 'select') {
     event.preventDefault();
     const id = item.dataset.id;
     setSelectedImage(id);
@@ -411,6 +417,11 @@ function pointerDown(event) {
       startWidth: width,
     };
     item.setPointerCapture(event.pointerId);
+    return;
+  }
+
+  if (activeTool === 'select') {
+    setSelectedImage(null);
     return;
   }
 
@@ -513,6 +524,12 @@ function moveSelectedImageLayer(direction) {
   pushHistory(`reorder-image-${direction}`);
 }
 
+layerButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    moveSelectedImageLayer(btn.dataset.layerAction);
+  });
+});
+
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
@@ -595,19 +612,18 @@ window.addEventListener('keydown', (event) => {
   }
 
   if (loweredKey === 'v') {
+    if (!copiedImagePayload) return;
     event.preventDefault();
-    if (copiedImagePayload) {
-      const duplicated = {
-        ...copiedImagePayload,
-        id: crypto.randomUUID(),
-        x: copiedImagePayload.x + 24,
-        y: copiedImagePayload.y + 24,
-      };
-      placeImage(duplicated, { silent: true });
-      broadcast('image-update', duplicated);
-      pushHistory('paste-image');
-      setSelectedImage(duplicated.id);
-    }
+    const duplicated = {
+      ...copiedImagePayload,
+      id: crypto.randomUUID(),
+      x: copiedImagePayload.x + 24,
+      y: copiedImagePayload.y + 24,
+    };
+    placeImage(duplicated, { silent: true });
+    broadcast('image-update', duplicated);
+    pushHistory('paste-image');
+    setSelectedImage(duplicated.id);
     return;
   }
 
@@ -792,7 +808,7 @@ channel.onmessage = (event) => {
   }
 };
 
-setTool('pen');
+setTool('select');
 syncPresence();
 renderPresence();
 pushHistory('initial');
