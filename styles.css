@@ -144,6 +144,8 @@ button.danger {
   border-radius: 10px;
   overflow: hidden;
   background: var(--board);
+  cursor: crosshair;
+  touch-action: none;
 }
 
 .board-viewport {
