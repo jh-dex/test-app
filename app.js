@@ -42,6 +42,8 @@ let isRestoringHistory = false;
 const history = [];
 let historyIndex = -1;
 let copiedImagePayload = null;
+let drawingOps = [];
+let historyFingerprint = '';
 
 const camera = {
   x: 0,
@@ -150,6 +152,11 @@ function drawSegment(segment) {
   ctx.lineTo(segment.to.x, segment.to.y);
   ctx.stroke();
   ctx.restore();
+}
+
+function renderDrawingFromOps() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawingOps.forEach((segment) => drawSegment(segment));
 }
 
 function broadcast(type, payload = {}) {
@@ -283,28 +290,33 @@ function serializeImages() {
   });
 }
 
+function makeHistoryFingerprint(images) {
+  const imageSignature = images
+    .map((image) => `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}`)
+    .join('|');
+  return `${drawingOps.length}::${imageSignature}`;
+}
+
 function snapshotBoardState() {
+  const images = serializeImages();
   return {
-    drawing: canvas.toDataURL('image/png'),
-    images: serializeImages(),
+    drawingOps: drawingOps.map((segment) => ({ ...segment })),
+    images,
+    fingerprint: makeHistoryFingerprint(images),
   };
 }
 
 function restoreBoardState(state, { broadcastRestore = false } = {}) {
   if (!state) return;
   isRestoringHistory = true;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const drawing = new Image();
-  drawing.onload = () => {
-    ctx.drawImage(drawing, 0, 0, WORLD.width, WORLD.height);
-    isRestoringHistory = false;
-  };
-  drawing.src = state.drawing;
+  drawingOps = (state.drawingOps || []).map((segment) => ({ ...segment }));
+  renderDrawingFromOps();
 
   imageLayer.innerHTML = '';
   state.images.forEach((payload) => placeImage(payload, { silent: true }));
   setSelectedImage(null);
+  historyFingerprint = state.fingerprint || makeHistoryFingerprint(state.images || []);
+  isRestoringHistory = false;
 
   if (broadcastRestore) {
     broadcast('board-state', state);
@@ -314,12 +326,8 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
 function pushHistory(reason = '') {
   if (isRestoringHistory) return;
   const snapshot = snapshotBoardState();
-
-  if (historyIndex >= 0) {
-    const prev = history[historyIndex];
-    if (prev && JSON.stringify(prev) === JSON.stringify(snapshot)) {
-      return;
-    }
+  if (snapshot.fingerprint === historyFingerprint) {
+    return;
   }
 
   history.splice(historyIndex + 1);
@@ -328,6 +336,7 @@ function pushHistory(reason = '') {
     history.shift();
   }
   historyIndex = history.length - 1;
+  historyFingerprint = snapshot.fingerprint;
 
   if (reason) {
     // no-op hook for debugging
@@ -434,6 +443,7 @@ function pointerMove(event) {
     tool: activeTool,
   };
   drawSegment(segment);
+  drawingOps.push({ ...segment });
   broadcast('draw', segment);
   lastPoint = current;
 }
@@ -652,13 +662,15 @@ window.addEventListener('paste', (event) => {
 });
 
 clearCanvasBtn.addEventListener('click', () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawingOps = [];
+  renderDrawingFromOps();
   broadcast('clear-drawing');
   pushHistory('clear-drawing');
 });
 
 resetBoardBtn.addEventListener('click', () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawingOps = [];
+  renderDrawingFromOps();
   imageLayer.innerHTML = '';
   setSelectedImage(null);
   broadcast('reset-all');
@@ -678,10 +690,17 @@ channel.onmessage = (event) => {
   const { type, source, payload } = event.data || {};
   if (source === clientId) return;
 
-  if (type === 'draw') drawSegment(payload);
-  if (type === 'clear-drawing') ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (type === 'draw') {
+    drawSegment(payload);
+    drawingOps.push({ ...payload });
+  }
+  if (type === 'clear-drawing') {
+    drawingOps = [];
+    renderDrawingFromOps();
+  }
   if (type === 'reset-all') {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawingOps = [];
+    renderDrawingFromOps();
     imageLayer.innerHTML = '';
     setSelectedImage(null);
   }
