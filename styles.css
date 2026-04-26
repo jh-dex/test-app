@@ -118,6 +118,12 @@ input[type='range'] {
   gap: 0.5rem;
 }
 
+.layer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
 button {
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -208,7 +214,7 @@ canvas {
 
 .image-layer {
   pointer-events: none;
-  z-index: 2;
+  z-index: 1;
 }
 
 .image-item {
@@ -255,7 +261,7 @@ canvas {
 }
 
 canvas {
-  z-index: 1;
+  z-index: 2;
 }
 
 .zoom-badge {
