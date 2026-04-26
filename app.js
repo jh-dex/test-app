@@ -104,6 +104,10 @@ function updateCursor() {
     board.style.cursor = 'grab';
     return;
   }
+  if (activeTool === 'select') {
+    board.style.cursor = 'default';
+    return;
+  }
   board.style.cursor = activeTool === 'eraser' ? 'cell' : 'crosshair';
 }
 
@@ -200,6 +204,7 @@ function setTool(toolName) {
   toolButtons.forEach((btn) => {
     btn.classList.toggle('is-active', btn.dataset.tool === toolName);
   });
+  canvas.style.pointerEvents = toolName === 'select' ? 'none' : 'auto';
   updateCursor();
 }
 
@@ -418,6 +423,7 @@ function pointerDown(event) {
   setSelectedImage(null);
 
   if (event.button !== 0) return;
+  if (activeTool === 'select') return;
   isDrawing = true;
   lastPoint = eventToWorld(event);
 }
@@ -544,6 +550,25 @@ board.addEventListener(
 );
 
 window.addEventListener('keydown', (event) => {
+  if (!isTypingTarget(event.target) && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const loweredKey = event.key.toLowerCase();
+    if (loweredKey === 'v') {
+      event.preventDefault();
+      setTool('select');
+      return;
+    }
+    if (loweredKey === 'b') {
+      event.preventDefault();
+      setTool('pen');
+      return;
+    }
+    if (loweredKey === 'e') {
+      event.preventDefault();
+      setTool('eraser');
+      return;
+    }
+  }
+
   if (event.code === 'Space' && !isTypingTarget(event.target)) {
     if (!isSpacePressed) {
       isSpacePressed = true;
