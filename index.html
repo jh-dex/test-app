@@ -61,6 +61,8 @@
           <p><kbd>Ctrl(Cmd)</kbd> + <kbd>+</kbd> / <kbd>-</kbd> / <kbd>0</kbd> 줌 제어</p>
           <p><kbd>Ctrl(Cmd)</kbd> + <kbd>Z</kbd> / <kbd>Shift</kbd> + <kbd>Z</kbd> 실행취소/다시실행</p>
           <p><kbd>Ctrl(Cmd)</kbd> + <kbd>C</kbd> / <kbd>V</kbd> 선택 이미지 복사/붙여넣기</p>
+          <p><kbd>Ctrl(Cmd)</kbd> + <kbd>[</kbd> / <kbd>]</kbd> 뒤로/앞으로 한 칸 이동</p>
+          <p><kbd>Ctrl(Cmd)</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd> 맨뒤/맨앞 보내기</p>
           <p>외부 이미지 파일 드래그 앤 드롭 / 클립보드 붙여넣기 지원</p>
         </div>
 
@@ -72,8 +74,9 @@
       <section class="board-wrap">
         <div id="board" class="board">
           <div id="viewport" class="board-viewport">
-            <div id="imageLayer" class="image-layer"></div>
+            <div id="imageLayerBack" class="image-layer image-layer-back"></div>
             <canvas id="drawCanvas"></canvas>
+            <div id="imageLayerFront" class="image-layer image-layer-front"></div>
           </div>
           <div id="zoomBadge" class="zoom-badge">100%</div>
         </div>

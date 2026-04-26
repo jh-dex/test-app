@@ -4,7 +4,8 @@ const board = document.getElementById('board');
 const viewport = document.getElementById('viewport');
 const canvas = document.getElementById('drawCanvas');
 const ctx = canvas.getContext('2d');
-const imageLayer = document.getElementById('imageLayer');
+const imageLayerBack = document.getElementById('imageLayerBack');
+const imageLayerFront = document.getElementById('imageLayerFront');
 const zoomBadge = document.getElementById('zoomBadge');
 const presence = document.getElementById('presence');
 const displayNameInput = document.getElementById('displayName');
@@ -203,7 +204,15 @@ function setTool(toolName) {
 }
 
 function getImageItem(id) {
-  return imageLayer.querySelector(`.image-item[data-id="${id}"]`);
+  return viewport.querySelector(`.image-item[data-id="${id}"]`);
+}
+
+function getAllImageItems() {
+  return [...viewport.querySelectorAll('.image-item')];
+}
+
+function getImageLayerByPlane(plane = 'front') {
+  return plane === 'back' ? imageLayerBack : imageLayerFront;
 }
 
 function getImagePayload(id) {
@@ -216,18 +225,29 @@ function getImagePayload(id) {
     x: Number(item.dataset.x || 0),
     y: Number(item.dataset.y || 0),
     width: Number(item.dataset.width || 200),
+    z: Number(item.dataset.z || 0),
   };
+}
+
+function syncImageZIndices() {
+  [imageLayerBack, imageLayerFront].forEach((layer) => {
+    [...layer.querySelectorAll('.image-item')].forEach((item, index) => {
+      item.dataset.z = String(index);
+      item.style.zIndex = String(index);
+    });
+  });
 }
 
 function setSelectedImage(id) {
   selectedImageId = id;
-  imageLayer.querySelectorAll('.image-item').forEach((item) => {
+  getAllImageItems().forEach((item) => {
     item.classList.toggle('is-selected', item.dataset.id === id);
   });
 }
 
-function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false } = {}) {
+function placeImage({ id, src, x = 20, y = 20, width = 200, plane = 'front' }, { silent = false } = {}) {
   let item = getImageItem(id);
+  const isNew = !item;
   if (!item) {
     item = document.createElement('div');
     item.className = 'image-item';
@@ -243,7 +263,6 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
     handle.setAttribute('aria-label', '이미지 크기 조절');
 
     item.append(img, handle);
-    imageLayer.appendChild(item);
   }
 
   const safeWidth = clamp(width, 40, WORLD.width);
@@ -252,12 +271,20 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
   item.dataset.x = String(safeX);
   item.dataset.y = String(safeY);
   item.dataset.width = String(safeWidth);
+  item.dataset.plane = plane === 'back' ? 'back' : 'front';
   item.style.left = `${safeX}px`;
   item.style.top = `${safeY}px`;
   item.style.width = `${safeWidth}px`;
 
   const img = item.querySelector('img');
   if (img && src) img.src = src;
+  const targetLayer = getImageLayerByPlane(item.dataset.plane);
+  if (isNew) {
+    targetLayer.appendChild(item);
+  } else if (item.parentElement !== targetLayer) {
+    targetLayer.appendChild(item);
+  }
+  syncImageZIndices();
   setSelectedImage(id);
 
   if (!silent) {
@@ -272,13 +299,14 @@ function removeImage(id, { silent = false } = {}) {
   if (selectedImageId === id) {
     setSelectedImage(null);
   }
+  syncImageZIndices();
   if (!silent) {
     broadcast('image-remove', { id });
   }
 }
 
 function serializeImages() {
-  return [...imageLayer.querySelectorAll('.image-item')].map((item) => {
+  return getAllImageItems().map((item) => {
     const img = item.querySelector('img');
     return {
       id: item.dataset.id,
@@ -286,13 +314,18 @@ function serializeImages() {
       x: Number(item.dataset.x || 0),
       y: Number(item.dataset.y || 0),
       width: Number(item.dataset.width || 200),
+      z: Number(item.dataset.z || 0),
+      plane: item.dataset.plane || 'front',
     };
   });
 }
 
 function makeHistoryFingerprint(images) {
   const imageSignature = images
-    .map((image) => `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}`)
+    .map(
+      (image) =>
+        `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}:${image.plane || 'front'}:${image.z || 0}`,
+    )
     .join('|');
   return `${drawingOps.length}::${imageSignature}`;
 }
@@ -312,7 +345,8 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
   drawingOps = (state.drawingOps || []).map((segment) => ({ ...segment }));
   renderDrawingFromOps();
 
-  imageLayer.innerHTML = '';
+  imageLayerBack.innerHTML = '';
+  imageLayerFront.innerHTML = '';
   state.images.forEach((payload) => placeImage(payload, { silent: true }));
   setSelectedImage(null);
   historyFingerprint = state.fingerprint || makeHistoryFingerprint(state.images || []);
@@ -470,6 +504,56 @@ function pointerUp(event) {
   lastPoint = null;
 }
 
+function broadcastImageOrder() {
+  const order = {
+    back: [...imageLayerBack.querySelectorAll('.image-item')].map((item) => item.dataset.id),
+    front: [...imageLayerFront.querySelectorAll('.image-item')].map((item) => item.dataset.id),
+  };
+  broadcast('image-order', { order });
+}
+
+function moveSelectedImageLayer(direction) {
+  if (!selectedImageId) return;
+  const item = getImageItem(selectedImageId);
+  if (!item) return;
+
+  const currentPlane = item.dataset.plane || 'front';
+  const currentLayer = getImageLayerByPlane(currentPlane);
+  const otherLayer = currentPlane === 'back' ? imageLayerFront : imageLayerBack;
+
+  if (direction === 'front') {
+    item.dataset.plane = 'front';
+    imageLayerFront.appendChild(item);
+  } else if (direction === 'back') {
+    item.dataset.plane = 'back';
+    imageLayerBack.prepend(item);
+  } else if (direction === 'forward') {
+    const next = item.nextElementSibling;
+    if (next) {
+      currentLayer.insertBefore(next, item);
+    } else if (currentPlane === 'back') {
+      item.dataset.plane = 'front';
+      imageLayerFront.prepend(item);
+    } else {
+      return;
+    }
+  } else if (direction === 'backward') {
+    const prev = item.previousElementSibling;
+    if (prev) {
+      currentLayer.insertBefore(item, prev);
+    } else if (currentPlane === 'front') {
+      item.dataset.plane = 'back';
+      otherLayer.appendChild(item);
+    } else {
+      return;
+    }
+  }
+
+  syncImageZIndices();
+  broadcastImageOrder();
+  pushHistory(`reorder-image-${direction}`);
+}
+
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
@@ -565,6 +649,26 @@ window.addEventListener('keydown', (event) => {
       pushHistory('paste-image');
       setSelectedImage(duplicated.id);
     }
+    return;
+  }
+
+  if (event.key === ']' && selectedImageId) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      moveSelectedImageLayer('front');
+    } else {
+      moveSelectedImageLayer('forward');
+    }
+    return;
+  }
+
+  if (event.key === '[' && selectedImageId) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      moveSelectedImageLayer('back');
+    } else {
+      moveSelectedImageLayer('backward');
+    }
   }
 });
 
@@ -621,6 +725,21 @@ function importImageFile(file, point = { x: 30, y: 30 }) {
   reader.readAsDataURL(file);
 }
 
+function importImageFromSrc(src, point = { x: 30, y: 30 }) {
+  if (!src) return;
+  const payload = {
+    id: crypto.randomUUID(),
+    src,
+    x: clamp(point.x, -WORLD.width, WORLD.width),
+    y: clamp(point.y, -WORLD.height, WORLD.height),
+    width: 220,
+    plane: 'front',
+  };
+  placeImage(payload, { silent: true });
+  broadcast('image-update', payload);
+  pushHistory('import-image-src');
+}
+
 board.addEventListener('dragover', (event) => {
   if ([...(event.dataTransfer?.types || [])].includes('Files')) {
     event.preventDefault();
@@ -643,22 +762,48 @@ board.addEventListener('drop', (event) => {
 window.addEventListener('paste', (event) => {
   if (isTypingTarget(event.target)) return;
 
-  const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith('image/'));
-  if (!files.length) return;
+  const itemFiles = [...(event.clipboardData?.items || [])]
+    .filter((item) => item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  const files = [...(event.clipboardData?.files || []), ...itemFiles].filter((file) =>
+    file.type.startsWith('image/'),
+  );
+  const clipboard = event.clipboardData;
 
-  event.preventDefault();
   const rect = board.getBoundingClientRect();
   const centerWorld = {
     x: (rect.width / 2 - camera.x) / camera.zoom,
     y: (rect.height / 2 - camera.y) / camera.zoom,
   };
 
-  files.forEach((file, index) => {
-    importImageFile(file, {
-      x: centerWorld.x - 120 + index * 24,
-      y: centerWorld.y - 70 + index * 24,
+  if (files.length) {
+    event.preventDefault();
+    files.forEach((file, index) => {
+      importImageFile(file, {
+        x: centerWorld.x - 120 + index * 24,
+        y: centerWorld.y - 70 + index * 24,
+      });
     });
-  });
+    return;
+  }
+
+  const html = clipboard?.getData('text/html') || '';
+  if (html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const src = doc.querySelector('img')?.getAttribute('src');
+    if (src) {
+      event.preventDefault();
+      importImageFromSrc(src, { x: centerWorld.x - 120, y: centerWorld.y - 70 });
+      return;
+    }
+  }
+
+  const text = clipboard?.getData('text/plain') || '';
+  if (/^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(text.trim())) {
+    event.preventDefault();
+    importImageFromSrc(text.trim(), { x: centerWorld.x - 120, y: centerWorld.y - 70 });
+  }
 });
 
 clearCanvasBtn.addEventListener('click', () => {
@@ -671,7 +816,9 @@ clearCanvasBtn.addEventListener('click', () => {
 resetBoardBtn.addEventListener('click', () => {
   drawingOps = [];
   renderDrawingFromOps();
-  imageLayer.innerHTML = '';
+  imageLayerBack.innerHTML = '';
+  imageLayerFront.innerHTML = '';
+  syncImageZIndices();
   setSelectedImage(null);
   broadcast('reset-all');
   pushHistory('reset-board');
@@ -701,11 +848,30 @@ channel.onmessage = (event) => {
   if (type === 'reset-all') {
     drawingOps = [];
     renderDrawingFromOps();
-    imageLayer.innerHTML = '';
+    imageLayerBack.innerHTML = '';
+    imageLayerFront.innerHTML = '';
+    syncImageZIndices();
     setSelectedImage(null);
   }
   if (type === 'image-update') placeImage(payload, { silent: true });
   if (type === 'image-remove') removeImage(payload.id, { silent: true });
+  if (type === 'image-order' && payload?.order) {
+    (payload.order.back || []).forEach((id) => {
+      const item = getImageItem(id);
+      if (item) {
+        item.dataset.plane = 'back';
+        imageLayerBack.appendChild(item);
+      }
+    });
+    (payload.order.front || []).forEach((id) => {
+      const item = getImageItem(id);
+      if (item) {
+        item.dataset.plane = 'front';
+        imageLayerFront.appendChild(item);
+      }
+    });
+    syncImageZIndices();
+  }
   if (type === 'board-state') restoreBoardState(payload);
 
   if (type === 'presence' && payload?.user) {
