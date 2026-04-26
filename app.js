@@ -15,6 +15,11 @@ const clearCanvasBtn = document.getElementById('clearCanvas');
 const resetBoardBtn = document.getElementById('resetBoard');
 const toolButtons = [...document.querySelectorAll('[data-tool]')];
 
+const WORLD = {
+  width: 8000,
+  height: 8000,
+};
+
 const clientId = crypto.randomUUID();
 const randomColor = `#${Math.floor(Math.random() * 0xffffff)
   .toString(16)
@@ -29,41 +34,99 @@ let activeTool = 'pen';
 let isDrawing = false;
 let lastPoint = null;
 let dragging = null;
-let zoomLevel = 1;
+let isSpacePressed = false;
+let panSession = null;
+const camera = {
+  x: 0,
+  y: 0,
+  zoom: 1,
+};
 const peers = new Map();
 
 function resizeCanvas() {
-  const rect = board.getBoundingClientRect();
   const pixelRatio = window.devicePixelRatio || 1;
-  canvas.width = rect.width * pixelRatio;
-  canvas.height = rect.height * pixelRatio;
-  canvas.style.width = `${rect.width}px`;
-  canvas.style.height = `${rect.height}px`;
+  canvas.width = WORLD.width * pixelRatio;
+  canvas.height = WORLD.height * pixelRatio;
+  canvas.style.width = `${WORLD.width}px`;
+  canvas.style.height = `${WORLD.height}px`;
+
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  viewport.style.width = `${rect.width}px`;
-  viewport.style.height = `${rect.height}px`;
-  updateZoomUI();
+
+  viewport.style.width = `${WORLD.width}px`;
+  viewport.style.height = `${WORLD.height}px`;
+
+  const rect = board.getBoundingClientRect();
+  if (!camera.x && !camera.y) {
+    camera.x = rect.width / 2 - WORLD.width / 2;
+    camera.y = rect.height / 2 - WORLD.height / 2;
+  }
+
+  updateViewportTransform();
 }
 
-function pointFromEvent(event) {
-  const rect = canvas.getBoundingClientRect();
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function eventToWorld(event) {
+  const rect = board.getBoundingClientRect();
   return {
-    x: (event.clientX - rect.left) / zoomLevel,
-    y: (event.clientY - rect.top) / zoomLevel,
+    x: (event.clientX - rect.left - camera.x) / camera.zoom,
+    y: (event.clientY - rect.top - camera.y) / camera.zoom,
   };
 }
 
-function updateZoomUI() {
-  const zoomText = `${Math.round(zoomLevel * 100)}%`;
-  zoomBadge.textContent = zoomText;
-  viewport.style.transform = `scale(${zoomLevel})`;
+
+function isTypingTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
 }
 
-function setZoom(nextZoom) {
-  zoomLevel = Math.min(3, Math.max(0.4, nextZoom));
+function updateCursor() {
+  const isPanning = Boolean(panSession);
+  if (isPanning) {
+    board.style.cursor = 'grabbing';
+    return;
+  }
+  if (isSpacePressed) {
+    board.style.cursor = 'grab';
+    return;
+  }
+  board.style.cursor = activeTool === 'eraser' ? 'cell' : 'crosshair';
+}
+
+function updateZoomUI() {
+  zoomBadge.textContent = `${Math.round(camera.zoom * 100)}%`;
+}
+
+function updateViewportTransform() {
+  viewport.style.transform = `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`;
   updateZoomUI();
+}
+
+function panBy(dx, dy) {
+  camera.x += dx;
+  camera.y += dy;
+  updateViewportTransform();
+}
+
+function zoomAt(nextZoom, anchorClientX, anchorClientY) {
+  const rect = board.getBoundingClientRect();
+  const anchorX = anchorClientX - rect.left;
+  const anchorY = anchorClientY - rect.top;
+  const clampedZoom = clamp(nextZoom, 0.2, 4);
+
+  const worldX = (anchorX - camera.x) / camera.zoom;
+  const worldY = (anchorY - camera.y) / camera.zoom;
+
+  camera.zoom = clampedZoom;
+  camera.x = anchorX - worldX * camera.zoom;
+  camera.y = anchorY - worldY * camera.zoom;
+
+  updateViewportTransform();
 }
 
 function drawSegment(segment) {
@@ -123,6 +186,7 @@ function setTool(toolName) {
   toolButtons.forEach((btn) => {
     btn.classList.toggle('is-active', btn.dataset.tool === toolName);
   });
+  updateCursor();
 }
 
 function placeImage({ id, src, x = 20, y = 20, width = 200 }) {
@@ -139,7 +203,25 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }) {
   img.style.width = `${width}px`;
 }
 
+function isPanTrigger(event) {
+  return event.button === 1 || (event.button === 0 && isSpacePressed);
+}
+
 function pointerDown(event) {
+  if (isPanTrigger(event)) {
+    event.preventDefault();
+    panSession = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: camera.x,
+      originY: camera.y,
+    };
+    board.setPointerCapture(event.pointerId);
+    updateCursor();
+    return;
+  }
+
   if (event.target.tagName === 'IMG') {
     event.preventDefault();
     event.target.setPointerCapture(event.pointerId);
@@ -147,21 +229,29 @@ function pointerDown(event) {
     dragging = {
       id: event.target.dataset.id,
       pointerId: event.pointerId,
-      offsetX: (event.clientX - imgRect.left) / zoomLevel,
-      offsetY: (event.clientY - imgRect.top) / zoomLevel,
+      offsetX: (event.clientX - imgRect.left) / camera.zoom,
+      offsetY: (event.clientY - imgRect.top) / camera.zoom,
     };
     return;
   }
 
+  if (event.button !== 0) return;
   isDrawing = true;
-  lastPoint = pointFromEvent(event);
+  lastPoint = eventToWorld(event);
 }
 
 function pointerMove(event) {
+  if (panSession && event.pointerId === panSession.pointerId) {
+    camera.x = panSession.originX + (event.clientX - panSession.startX);
+    camera.y = panSession.originY + (event.clientY - panSession.startY);
+    updateViewportTransform();
+    return;
+  }
+
   if (dragging && event.pointerId === dragging.pointerId) {
-    const rect = board.getBoundingClientRect();
-    const x = (event.clientX - rect.left) / zoomLevel - dragging.offsetX;
-    const y = (event.clientY - rect.top) / zoomLevel - dragging.offsetY;
+    const world = eventToWorld(event);
+    const x = world.x - dragging.offsetX;
+    const y = world.y - dragging.offsetY;
     const img = imageLayer.querySelector(`[data-id="${dragging.id}"]`);
     if (img) {
       img.style.left = `${x}px`;
@@ -172,7 +262,7 @@ function pointerMove(event) {
   }
 
   if (!isDrawing || !lastPoint) return;
-  const current = pointFromEvent(event);
+  const current = eventToWorld(event);
   const segment = {
     from: lastPoint,
     to: current,
@@ -185,27 +275,74 @@ function pointerMove(event) {
   lastPoint = current;
 }
 
-function pointerUp() {
+function pointerUp(event) {
+  if (panSession && event.pointerId === panSession.pointerId) {
+    panSession = null;
+    updateCursor();
+  }
   isDrawing = false;
   lastPoint = null;
   dragging = null;
 }
 
-canvas.addEventListener('pointerdown', pointerDown);
-canvas.addEventListener('pointermove', pointerMove);
+board.addEventListener('pointerdown', pointerDown);
+board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
-imageLayer.addEventListener('pointerdown', pointerDown);
-imageLayer.addEventListener('pointermove', pointerMove);
-board.addEventListener(
-  'wheel',
-  (event) => {
-    if (!event.ctrlKey) return;
+board.addEventListener('wheel', (event) => {
+  const zoomGesture = event.ctrlKey || event.metaKey;
+  if (zoomGesture) {
     event.preventDefault();
-    const delta = event.deltaY < 0 ? 0.1 : -0.1;
-    setZoom(zoomLevel + delta);
-  },
-  { passive: false }
-);
+    const delta = -event.deltaY * 0.0015;
+    zoomAt(camera.zoom * (1 + delta), event.clientX, event.clientY);
+    return;
+  }
+
+  event.preventDefault();
+  const speed = 1;
+  const panX = event.shiftKey ? -event.deltaY * speed : -event.deltaX * speed;
+  const panY = event.shiftKey ? 0 : -event.deltaY * speed;
+  panBy(panX, panY);
+}, { passive: false });
+
+window.addEventListener('keydown', (event) => {
+  if (isTypingTarget(event.target)) return;
+
+  if (event.code === 'Space') {
+    if (!isSpacePressed) {
+      isSpacePressed = true;
+      updateCursor();
+    }
+    event.preventDefault();
+    return;
+  }
+
+  const mod = event.ctrlKey || event.metaKey;
+  if (!mod) return;
+
+  if (event.key === '=' || event.key === '+') {
+    event.preventDefault();
+    const rect = board.getBoundingClientRect();
+    zoomAt(camera.zoom + 0.1, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  } else if (event.key === '-') {
+    event.preventDefault();
+    const rect = board.getBoundingClientRect();
+    zoomAt(camera.zoom - 0.1, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  } else if (event.key === '0') {
+    event.preventDefault();
+    const rect = board.getBoundingClientRect();
+    camera.zoom = 1;
+    camera.x = rect.width / 2 - WORLD.width / 2;
+    camera.y = rect.height / 2 - WORLD.height / 2;
+    updateViewportTransform();
+  }
+});
+
+window.addEventListener('keyup', (event) => {
+  if (event.code === 'Space') {
+    isSpacePressed = false;
+    updateCursor();
+  }
+});
 
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
@@ -242,8 +379,8 @@ function importImageFile(file, point = { x: 30, y: 30 }) {
     const payload = {
       id: crypto.randomUUID(),
       src: String(reader.result),
-      x: Math.max(0, point.x),
-      y: Math.max(0, point.y),
+      x: clamp(point.x, -WORLD.width, WORLD.width),
+      y: clamp(point.y, -WORLD.height, WORLD.height),
       width: 220,
     };
     placeImage(payload);
@@ -260,10 +397,10 @@ board.addEventListener('drop', (event) => {
   event.preventDefault();
   const file = event.dataTransfer?.files?.[0];
   if (!file) return;
-  const rect = board.getBoundingClientRect();
+  const world = eventToWorld(event);
   importImageFile(file, {
-    x: (event.clientX - rect.left) / zoomLevel - 110,
-    y: (event.clientY - rect.top) / zoomLevel - 60,
+    x: world.x - 110,
+    y: world.y - 60,
   });
 });
 
@@ -309,3 +446,9 @@ setInterval(() => {
   syncPresence();
   renderPresence();
 }, 5000);
+
+window.addEventListener('blur', () => {
+  isSpacePressed = false;
+  panSession = null;
+  updateCursor();
+});
