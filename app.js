@@ -16,8 +16,8 @@ const resetBoardBtn = document.getElementById('resetBoard');
 const toolButtons = [...document.querySelectorAll('[data-tool]')];
 
 const WORLD = {
-  width: 6000,
-  height: 6000,
+  width: 8000,
+  height: 8000,
 };
 
 const clientId = crypto.randomUUID();
@@ -76,6 +76,13 @@ function eventToWorld(event) {
     x: (event.clientX - rect.left - camera.x) / camera.zoom,
     y: (event.clientY - rect.top - camera.y) / camera.zoom,
   };
+}
+
+
+function isTypingTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
 }
 
 function updateCursor() {
@@ -298,6 +305,8 @@ board.addEventListener('wheel', (event) => {
 }, { passive: false });
 
 window.addEventListener('keydown', (event) => {
+  if (isTypingTarget(event.target)) return;
+
   if (event.code === 'Space') {
     if (!isSpacePressed) {
       isSpacePressed = true;
@@ -437,3 +446,9 @@ setInterval(() => {
   syncPresence();
   renderPresence();
 }, 5000);
+
+window.addEventListener('blur', () => {
+  isSpacePressed = false;
+  panSession = null;
+  updateCursor();
+});
