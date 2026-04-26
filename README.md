@@ -5,11 +5,6 @@
 ## 포함 기능 (MVP)
 
 - 실시간 스케치(펜/지우개)
-- 보드 드래그앤드롭 이미지 추가
-- 이미지 자유 이동(마우스 드래그)
-- 확대/축소 퍼센트 HUD(+) (-) 및 Ctrl+휠 줌
-- 같은 브라우저 여러 탭 간 실시간 동기화(BroadcastChannel)
-- 간단한 참여자(presence) 표시
 - 이미지 업로드 후 보드에 배치
 - 드래그로 이미지 이동
 - 같은 브라우저 여러 탭 간 실시간 동기화(BroadcastChannel)
@@ -17,9 +12,8 @@
 
 > 참고: 현재는 브라우저 탭 간 동기화 기준이며, 서버 기반 멀티유저(다른 기기 간 협업)는 다음 단계에서 WebSocket 백엔드 추가로 확장 가능합니다.
 
-> 참고: 현재는 브라우저 탭 간 동기화 기준입니다. 즉, **같은 브라우저/같은 기기**에서 탭 여러 개를 열었을 때 실시간 동기화가 됩니다.
+## 실행 방법
 
-## 로컬 실행
 정적 파일이라서 아무 간단한 서버로 실행하면 됩니다.
 
 ```bash
@@ -29,22 +23,6 @@ python3 -m http.server 4173
 브라우저에서 `http://localhost:4173` 접속 후,
 같은 주소를 탭 여러 개로 열어 실시간 동기화를 확인하세요.
 
-## GitHub Pages 배포 (웹에 바로 띄우기)
-
-이 리포에는 `main` 브랜치 push 시 자동 배포되는 워크플로우가 포함되어 있습니다.
-
-1. GitHub 저장소에서 **Settings → Pages** 이동
-2. **Build and deployment** 를 **GitHub Actions** 로 설정
-3. `main` 브랜치에 push
-4. Actions의 `Deploy to GitHub Pages` 완료 후 아래 주소로 접속
-
-```text
-https://<github-username>.github.io/<repo-name>/
-```
-
-## 한계 / 다음 단계
-
-1. 다른 기기/다른 사용자 간 실시간 협업(WebSocket/SSE 백엔드 필요)
 ## 다음 단계 제안
 
 1. Node + WebSocket 서버로 진짜 멀티유저 동기화
