@@ -2,8 +2,7 @@ const channel = new BroadcastChannel('live-board-mvp');
 
 const board = document.getElementById('board');
 const viewport = document.getElementById('viewport');
-const canvas = document.getElementById('drawCanvas');
-const ctx = canvas.getContext('2d');
+const drawLayer = document.getElementById('drawLayer');
 const imageLayer = document.getElementById('imageLayer');
 const zoomBadge = document.getElementById('zoomBadge');
 const presence = document.getElementById('presence');
@@ -45,6 +44,8 @@ let historyIndex = -1;
 let copiedImagePayload = null;
 let drawingOps = [];
 let historyFingerprint = '';
+let activeStroke = null;
+const liveStrokes = new Map();
 
 const camera = {
   x: 0,
@@ -54,15 +55,11 @@ const camera = {
 const peers = new Map();
 
 function resizeCanvas() {
-  const pixelRatio = window.devicePixelRatio || 1;
-  canvas.width = WORLD.width * pixelRatio;
-  canvas.height = WORLD.height * pixelRatio;
-  canvas.style.width = `${WORLD.width}px`;
-  canvas.style.height = `${WORLD.height}px`;
-
-  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  drawLayer.setAttribute('viewBox', `0 0 ${WORLD.width} ${WORLD.height}`);
+  drawLayer.setAttribute('width', String(WORLD.width));
+  drawLayer.setAttribute('height', String(WORLD.height));
+  drawLayer.style.width = `${WORLD.width}px`;
+  drawLayer.style.height = `${WORLD.height}px`;
 
   viewport.style.width = `${WORLD.width}px`;
   viewport.style.height = `${WORLD.height}px`;
@@ -142,26 +139,51 @@ function zoomAt(nextZoom, anchorClientX, anchorClientY) {
   updateViewportTransform();
 }
 
-function drawSegment(segment) {
-  ctx.save();
-  if (segment.tool === 'eraser') {
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.strokeStyle = 'rgba(0,0,0,1)';
-  } else {
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = segment.color;
+function createSvgPath(stroke) {
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.dataset.strokeId = stroke.id;
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  path.setAttribute('stroke-width', String(stroke.size));
+  path.setAttribute('stroke', stroke.tool === 'eraser' ? '#f8fafc' : stroke.color);
+  return path;
+}
+
+function strokeToPathD(points) {
+  if (!points.length) return '';
+  if (points.length === 1) {
+    const p = points[0];
+    return `M ${p.x} ${p.y} L ${p.x + 0.01} ${p.y + 0.01}`;
   }
-  ctx.lineWidth = segment.size;
-  ctx.beginPath();
-  ctx.moveTo(segment.from.x, segment.from.y);
-  ctx.lineTo(segment.to.x, segment.to.y);
-  ctx.stroke();
-  ctx.restore();
+
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const curr = points[i];
+    const next = points[i + 1];
+    const xc = (curr.x + next.x) / 2;
+    const yc = (curr.y + next.y) / 2;
+    d += ` Q ${curr.x} ${curr.y} ${xc} ${yc}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x} ${last.y}`;
+  return d;
+}
+
+function renderStroke(stroke) {
+  if (!stroke.pathEl) {
+    stroke.pathEl = createSvgPath(stroke);
+    drawLayer.appendChild(stroke.pathEl);
+  }
+  stroke.pathEl.setAttribute('d', strokeToPathD(stroke.points));
 }
 
 function renderDrawingFromOps() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawingOps.forEach((segment) => drawSegment(segment));
+  drawLayer.innerHTML = '';
+  drawingOps.forEach((stroke) => {
+    const rendered = { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
+    renderStroke(rendered);
+  });
 }
 
 function broadcast(type, payload = {}) {
@@ -204,7 +226,6 @@ function setTool(toolName) {
   toolButtons.forEach((btn) => {
     btn.classList.toggle('is-active', btn.dataset.tool === toolName);
   });
-  canvas.style.pointerEvents = toolName === 'select' ? 'none' : 'auto';
   updateCursor();
 }
 
@@ -320,7 +341,10 @@ function makeHistoryFingerprint(images) {
 function snapshotBoardState() {
   const images = serializeImages();
   return {
-    drawingOps: drawingOps.map((segment) => ({ ...segment })),
+    drawingOps: drawingOps.map((stroke) => ({
+      ...stroke,
+      points: stroke.points.map((point) => ({ ...point })),
+    })),
     images,
     fingerprint: makeHistoryFingerprint(images),
   };
@@ -329,7 +353,10 @@ function snapshotBoardState() {
 function restoreBoardState(state, { broadcastRestore = false } = {}) {
   if (!state) return;
   isRestoringHistory = true;
-  drawingOps = (state.drawingOps || []).map((segment) => ({ ...segment }));
+  drawingOps = (state.drawingOps || []).map((stroke) => ({
+    ...stroke,
+    points: (stroke.points || []).map((point) => ({ ...point })),
+  }));
   renderDrawingFromOps();
 
   imageLayer.innerHTML = '';
@@ -426,6 +453,22 @@ function pointerDown(event) {
   if (activeTool === 'select') return;
   isDrawing = true;
   lastPoint = eventToWorld(event);
+  activeStroke = {
+    id: crypto.randomUUID(),
+    color: me.color,
+    size: Number(brushSize.value),
+    tool: activeTool,
+    points: [{ ...lastPoint }],
+  };
+  renderStroke(activeStroke);
+  liveStrokes.set(activeStroke.id, activeStroke);
+  broadcast('stroke-start', {
+    id: activeStroke.id,
+    color: activeStroke.color,
+    size: activeStroke.size,
+    tool: activeStroke.tool,
+    point: lastPoint,
+  });
 }
 
 function pointerMove(event) {
@@ -456,16 +499,18 @@ function pointerMove(event) {
 
   if (!isDrawing || !lastPoint) return;
   const current = eventToWorld(event);
-  const segment = {
-    from: lastPoint,
-    to: current,
-    color: me.color,
-    size: Number(brushSize.value),
-    tool: activeTool,
-  };
-  drawSegment(segment);
-  drawingOps.push({ ...segment });
-  broadcast('draw', segment);
+  const dx = current.x - lastPoint.x;
+  const dy = current.y - lastPoint.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 0.3 || !activeStroke) {
+    return;
+  }
+  activeStroke.points.push({ ...current });
+  renderStroke(activeStroke);
+  broadcast('stroke-append', {
+    id: activeStroke.id,
+    point: current,
+  });
   lastPoint = current;
 }
 
@@ -485,10 +530,22 @@ function pointerUp(event) {
   }
 
   if (isDrawing && event.button === 0) {
+    if (activeStroke) {
+      drawingOps.push({
+        id: activeStroke.id,
+        color: activeStroke.color,
+        size: activeStroke.size,
+        tool: activeStroke.tool,
+        points: activeStroke.points.map((point) => ({ ...point })),
+      });
+      liveStrokes.delete(activeStroke.id);
+      broadcast('stroke-end', { id: activeStroke.id });
+    }
     pushHistory('draw-stroke');
   }
   isDrawing = false;
   lastPoint = null;
+  activeStroke = null;
 }
 
 function broadcastImageOrder() {
@@ -763,6 +820,7 @@ window.addEventListener('paste', (event) => {
 
 clearCanvasBtn.addEventListener('click', () => {
   drawingOps = [];
+  liveStrokes.clear();
   renderDrawingFromOps();
   broadcast('clear-drawing');
   pushHistory('clear-drawing');
@@ -770,6 +828,7 @@ clearCanvasBtn.addEventListener('click', () => {
 
 resetBoardBtn.addEventListener('click', () => {
   drawingOps = [];
+  liveStrokes.clear();
   renderDrawingFromOps();
   imageLayer.innerHTML = '';
   syncImageZIndices();
@@ -791,16 +850,56 @@ channel.onmessage = (event) => {
   const { type, source, payload } = event.data || {};
   if (source === clientId) return;
 
-  if (type === 'draw') {
-    drawSegment(payload);
-    drawingOps.push({ ...payload });
+  if (type === 'stroke-start' && payload?.id && payload?.point) {
+    const remoteStroke = {
+      id: payload.id,
+      color: payload.color || '#000000',
+      size: Number(payload.size || 4),
+      tool: payload.tool || 'pen',
+      points: [{ ...payload.point }],
+    };
+    liveStrokes.set(remoteStroke.id, remoteStroke);
+    renderStroke(remoteStroke);
+  }
+  if (type === 'stroke-append' && payload?.id && payload?.point) {
+    const remoteStroke = liveStrokes.get(payload.id);
+    if (remoteStroke) {
+      remoteStroke.points.push({ ...payload.point });
+      renderStroke(remoteStroke);
+    }
+  }
+  if (type === 'stroke-end' && payload?.id) {
+    const remoteStroke = liveStrokes.get(payload.id);
+    if (remoteStroke) {
+      drawingOps.push({
+        id: remoteStroke.id,
+        color: remoteStroke.color,
+        size: remoteStroke.size,
+        tool: remoteStroke.tool,
+        points: remoteStroke.points.map((point) => ({ ...point })),
+      });
+      liveStrokes.delete(payload.id);
+    }
+  }
+  if (type === 'draw' && payload?.from && payload?.to) {
+    const fallbackStroke = {
+      id: crypto.randomUUID(),
+      color: payload.color || '#000000',
+      size: Number(payload.size || 4),
+      tool: payload.tool || 'pen',
+      points: [{ ...payload.from }, { ...payload.to }],
+    };
+    drawingOps.push(fallbackStroke);
+    renderStroke(fallbackStroke);
   }
   if (type === 'clear-drawing') {
     drawingOps = [];
+    liveStrokes.clear();
     renderDrawingFromOps();
   }
   if (type === 'reset-all') {
     drawingOps = [];
+    liveStrokes.clear();
     renderDrawingFromOps();
     imageLayer.innerHTML = '';
     syncImageZIndices();
@@ -836,5 +935,8 @@ window.addEventListener('blur', () => {
   isSpacePressed = false;
   panSession = null;
   interaction = null;
+  isDrawing = false;
+  lastPoint = null;
+  activeStroke = null;
   updateCursor();
 });

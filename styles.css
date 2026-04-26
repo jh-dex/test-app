@@ -207,14 +207,20 @@ kbd {
 }
 
 .image-layer,
-canvas {
+.draw-layer {
   position: absolute;
   inset: 0;
 }
 
-.image-layer {
+.draw-layer {
   pointer-events: none;
   z-index: 1;
+  overflow: visible;
+}
+
+.image-layer {
+  pointer-events: none;
+  z-index: 2;
 }
 
 .image-item {
@@ -258,10 +264,6 @@ canvas {
 
 .image-item.is-selected .resize-handle {
   display: block;
-}
-
-canvas {
-  z-index: 2;
 }
 
 .zoom-badge {
