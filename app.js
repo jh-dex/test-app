@@ -20,6 +20,7 @@ const WORLD = {
   height: 8000,
 };
 
+const HISTORY_LIMIT = 120;
 const clientId = crypto.randomUUID();
 const randomColor = `#${Math.floor(Math.random() * 0xffffff)
   .toString(16)
@@ -30,18 +31,22 @@ let me = {
   color: randomColor,
   updatedAt: Date.now(),
 };
+
 let activeTool = 'pen';
 let isDrawing = false;
 let lastPoint = null;
-let dragging = null;
+let currentStroke = null;
+let interaction = null;
+let selectedImageId = null;
 let isSpacePressed = false;
 let panSession = null;
-const camera = {
-  x: 0,
-  y: 0,
-  zoom: 1,
-};
+let copiedImagePayload = null;
+
+const camera = { x: 0, y: 0, zoom: 1 };
 const peers = new Map();
+const strokes = [];
+const history = [];
+let historyIndex = -1;
 
 function resizeCanvas() {
   const pixelRatio = window.devicePixelRatio || 1;
@@ -63,6 +68,7 @@ function resizeCanvas() {
     camera.y = rect.height / 2 - WORLD.height / 2;
   }
 
+  redrawFromState();
   updateViewportTransform();
 }
 
@@ -78,7 +84,6 @@ function eventToWorld(event) {
   };
 }
 
-
 function isTypingTarget(target) {
   if (!target) return false;
   const tag = target.tagName;
@@ -86,8 +91,7 @@ function isTypingTarget(target) {
 }
 
 function updateCursor() {
-  const isPanning = Boolean(panSession);
-  if (isPanning) {
+  if (panSession) {
     board.style.cursor = 'grabbing';
     return;
   }
@@ -146,6 +150,15 @@ function drawSegment(segment) {
   ctx.restore();
 }
 
+function drawStroke(stroke) {
+  stroke.segments.forEach(drawSegment);
+}
+
+function redrawFromState() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  strokes.forEach(drawStroke);
+}
+
 function broadcast(type, payload = {}) {
   channel.postMessage({
     type,
@@ -164,9 +177,7 @@ function renderPresence() {
   const now = Date.now();
   peers.set(me.id, me);
   for (const [id, user] of peers) {
-    if (now - user.updatedAt > 15000) {
-      peers.delete(id);
-    }
+    if (now - user.updatedAt > 15000) peers.delete(id);
   }
 
   presence.innerHTML = '';
@@ -183,24 +194,199 @@ function renderPresence() {
 
 function setTool(toolName) {
   activeTool = toolName;
-  toolButtons.forEach((btn) => {
-    btn.classList.toggle('is-active', btn.dataset.tool === toolName);
-  });
+  toolButtons.forEach((btn) => btn.classList.toggle('is-active', btn.dataset.tool === toolName));
   updateCursor();
 }
 
-function placeImage({ id, src, x = 20, y = 20, width = 200 }) {
-  let img = imageLayer.querySelector(`[data-id="${id}"]`);
-  if (!img) {
-    img = document.createElement('img');
-    img.dataset.id = id;
+function getImageItem(id) {
+  return imageLayer.querySelector(`.image-item[data-id="${id}"]`);
+}
+
+function getImagePayload(id) {
+  const item = getImageItem(id);
+  if (!item) return null;
+  const img = item.querySelector('img');
+  return {
+    id,
+    src: img?.src || '',
+    x: Number(item.dataset.x || 0),
+    y: Number(item.dataset.y || 0),
+    width: Number(item.dataset.width || 200),
+  };
+}
+
+function serializeImages() {
+  return [...imageLayer.querySelectorAll('.image-item')].map((item) => ({
+    id: item.dataset.id,
+    src: item.querySelector('img')?.src || '',
+    x: Number(item.dataset.x || 0),
+    y: Number(item.dataset.y || 0),
+    width: Number(item.dataset.width || 200),
+  }));
+}
+
+function restoreImages(images) {
+  imageLayer.innerHTML = '';
+  images.forEach((payload) => placeImage(payload, { silent: true }));
+  setSelectedImage(null);
+}
+
+function setSelectedImage(id) {
+  selectedImageId = id;
+  imageLayer.querySelectorAll('.image-item').forEach((item) => {
+    item.classList.toggle('is-selected', item.dataset.id === id);
+  });
+}
+
+function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false } = {}) {
+  let item = getImageItem(id);
+  if (!item) {
+    item = document.createElement('div');
+    item.className = 'image-item';
+    item.dataset.id = id;
+
+    const img = document.createElement('img');
     img.draggable = false;
-    imageLayer.appendChild(img);
+    img.alt = 'board-image';
+
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.className = 'resize-handle';
+    handle.setAttribute('aria-label', '이미지 크기 조절');
+
+    item.append(img, handle);
+    imageLayer.appendChild(item);
   }
-  img.src = src;
-  img.style.left = `${x}px`;
-  img.style.top = `${y}px`;
-  img.style.width = `${width}px`;
+
+  const safeWidth = clamp(width, 40, WORLD.width);
+  const safeX = clamp(x, -WORLD.width, WORLD.width);
+  const safeY = clamp(y, -WORLD.height, WORLD.height);
+
+  item.dataset.x = String(safeX);
+  item.dataset.y = String(safeY);
+  item.dataset.width = String(safeWidth);
+  item.style.left = `${safeX}px`;
+  item.style.top = `${safeY}px`;
+  item.style.width = `${safeWidth}px`;
+
+  const img = item.querySelector('img');
+  if (img && src) img.src = src;
+  setSelectedImage(id);
+
+  if (!silent) broadcast('image-update', getImagePayload(id));
+}
+
+function removeImage(id, { silent = false } = {}) {
+  const item = getImageItem(id);
+  if (!item) return;
+  item.remove();
+  if (selectedImageId === id) setSelectedImage(null);
+  if (!silent) broadcast('image-remove', { id });
+}
+
+function pushHistoryEntry(entry) {
+  history.splice(historyIndex + 1);
+  history.push(entry);
+  if (history.length > HISTORY_LIMIT) history.shift();
+  historyIndex = history.length - 1;
+}
+
+function undo() {
+  if (historyIndex < 0) return;
+  const entry = history[historyIndex];
+  entry.undo();
+  historyIndex -= 1;
+}
+
+function redo() {
+  if (historyIndex >= history.length - 1) return;
+  const entry = history[historyIndex + 1];
+  entry.redo();
+  historyIndex += 1;
+}
+
+function recordStroke(stroke) {
+  pushHistoryEntry({
+    redo() {
+      strokes.push(stroke);
+      drawStroke(stroke);
+    },
+    undo() {
+      strokes.pop();
+      redrawFromState();
+    },
+  });
+}
+
+function recordClearDrawing(previousStrokes) {
+  pushHistoryEntry({
+    redo() {
+      strokes.length = 0;
+      redrawFromState();
+      broadcast('clear-drawing');
+    },
+    undo() {
+      strokes.length = 0;
+      strokes.push(...previousStrokes);
+      redrawFromState();
+    },
+  });
+}
+
+function recordResetBoard(previousStrokes, previousImages) {
+  pushHistoryEntry({
+    redo() {
+      strokes.length = 0;
+      redrawFromState();
+      restoreImages([]);
+      broadcast('reset-all');
+    },
+    undo() {
+      strokes.length = 0;
+      strokes.push(...previousStrokes);
+      redrawFromState();
+      restoreImages(previousImages);
+    },
+  });
+}
+
+function recordImageTransform(beforePayload, afterPayload) {
+  pushHistoryEntry({
+    redo() {
+      placeImage(afterPayload, { silent: true });
+      broadcast('image-update', afterPayload);
+    },
+    undo() {
+      placeImage(beforePayload, { silent: true });
+      broadcast('image-update', beforePayload);
+    },
+  });
+}
+
+function recordImageAdd(payload) {
+  pushHistoryEntry({
+    redo() {
+      placeImage(payload, { silent: true });
+      broadcast('image-update', payload);
+    },
+    undo() {
+      removeImage(payload.id, { silent: true });
+      broadcast('image-remove', { id: payload.id });
+    },
+  });
+}
+
+function recordImageDelete(payload) {
+  pushHistoryEntry({
+    redo() {
+      removeImage(payload.id, { silent: true });
+      broadcast('image-remove', { id: payload.id });
+    },
+    undo() {
+      placeImage(payload, { silent: true });
+      broadcast('image-update', payload);
+    },
+  });
 }
 
 function isPanTrigger(event) {
@@ -222,21 +408,41 @@ function pointerDown(event) {
     return;
   }
 
-  if (event.target.tagName === 'IMG') {
+  const item = event.target.closest('.image-item');
+  if (item) {
     event.preventDefault();
-    event.target.setPointerCapture(event.pointerId);
-    const imgRect = event.target.getBoundingClientRect();
-    dragging = {
-      id: event.target.dataset.id,
+    const id = item.dataset.id;
+    setSelectedImage(id);
+
+    const world = eventToWorld(event);
+    const x = Number(item.dataset.x || 0);
+    const y = Number(item.dataset.y || 0);
+    const width = Number(item.dataset.width || 200);
+
+    interaction = {
+      mode: event.target.classList.contains('resize-handle') ? 'resize-image' : 'move-image',
+      id,
       pointerId: event.pointerId,
-      offsetX: (event.clientX - imgRect.left) / camera.zoom,
-      offsetY: (event.clientY - imgRect.top) / camera.zoom,
+      offsetX: world.x - x,
+      offsetY: world.y - y,
+      startX: world.x,
+      startY: world.y,
+      startWidth: width,
+      before: getImagePayload(id),
     };
+    item.setPointerCapture(event.pointerId);
     return;
   }
 
+  setSelectedImage(null);
   if (event.button !== 0) return;
+
   isDrawing = true;
+  currentStroke = {
+    id: crypto.randomUUID(),
+    author: clientId,
+    segments: [],
+  };
   lastPoint = eventToWorld(event);
 }
 
@@ -248,15 +454,26 @@ function pointerMove(event) {
     return;
   }
 
-  if (dragging && event.pointerId === dragging.pointerId) {
+  if (interaction && event.pointerId === interaction.pointerId) {
     const world = eventToWorld(event);
-    const x = world.x - dragging.offsetX;
-    const y = world.y - dragging.offsetY;
-    const img = imageLayer.querySelector(`[data-id="${dragging.id}"]`);
-    if (img) {
-      img.style.left = `${x}px`;
-      img.style.top = `${y}px`;
-      broadcast('image-move', { id: dragging.id, x, y });
+    if (interaction.mode === 'move-image') {
+      placeImage(
+        {
+          ...getImagePayload(interaction.id),
+          x: world.x - interaction.offsetX,
+          y: world.y - interaction.offsetY,
+        },
+        { silent: true },
+      );
+    } else {
+      const delta = Math.max(world.x - interaction.startX, world.y - interaction.startY);
+      placeImage(
+        {
+          ...getImagePayload(interaction.id),
+          width: clamp(interaction.startWidth + delta, 40, WORLD.width),
+        },
+        { silent: true },
+      );
     }
     return;
   }
@@ -270,7 +487,9 @@ function pointerMove(event) {
     size: Number(brushSize.value),
     tool: activeTool,
   };
+
   drawSegment(segment);
+  currentStroke.segments.push(segment);
   broadcast('draw', segment);
   lastPoint = current;
 }
@@ -280,34 +499,53 @@ function pointerUp(event) {
     panSession = null;
     updateCursor();
   }
+
+  if (interaction && event.pointerId === interaction.pointerId) {
+    const after = getImagePayload(interaction.id);
+    const before = interaction.before;
+    interaction = null;
+    if (after && before && (after.x !== before.x || after.y !== before.y || after.width !== before.width)) {
+      recordImageTransform(before, after);
+      broadcast('image-update', after);
+    }
+  }
+
+  if (isDrawing && event.button === 0) {
+    if (currentStroke && currentStroke.segments.length) {
+      strokes.push(currentStroke);
+      recordStroke(currentStroke);
+    }
+    currentStroke = null;
+  }
+
   isDrawing = false;
   lastPoint = null;
-  dragging = null;
 }
 
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
 window.addEventListener('pointerup', pointerUp);
-board.addEventListener('wheel', (event) => {
-  const zoomGesture = event.ctrlKey || event.metaKey;
-  if (zoomGesture) {
-    event.preventDefault();
-    const delta = -event.deltaY * 0.0015;
-    zoomAt(camera.zoom * (1 + delta), event.clientX, event.clientY);
-    return;
-  }
 
-  event.preventDefault();
-  const speed = 1;
-  const panX = event.shiftKey ? -event.deltaY * speed : -event.deltaX * speed;
-  const panY = event.shiftKey ? 0 : -event.deltaY * speed;
-  panBy(panX, panY);
-}, { passive: false });
+board.addEventListener(
+  'wheel',
+  (event) => {
+    const zoomGesture = event.ctrlKey || event.metaKey;
+    if (zoomGesture) {
+      event.preventDefault();
+      zoomAt(camera.zoom * (1 - event.deltaY * 0.0015), event.clientX, event.clientY);
+      return;
+    }
+
+    event.preventDefault();
+    const panX = event.shiftKey ? -event.deltaY : -event.deltaX;
+    const panY = event.shiftKey ? 0 : -event.deltaY;
+    panBy(panX, panY);
+  },
+  { passive: false },
+);
 
 window.addEventListener('keydown', (event) => {
-  if (isTypingTarget(event.target)) return;
-
-  if (event.code === 'Space') {
+  if (event.code === 'Space' && !isTypingTarget(event.target)) {
     if (!isSpacePressed) {
       isSpacePressed = true;
       updateCursor();
@@ -323,17 +561,65 @@ window.addEventListener('keydown', (event) => {
     event.preventDefault();
     const rect = board.getBoundingClientRect();
     zoomAt(camera.zoom + 0.1, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  } else if (event.key === '-') {
+    return;
+  }
+  if (event.key === '-') {
     event.preventDefault();
     const rect = board.getBoundingClientRect();
     zoomAt(camera.zoom - 0.1, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  } else if (event.key === '0') {
+    return;
+  }
+  if (event.key === '0') {
     event.preventDefault();
     const rect = board.getBoundingClientRect();
     camera.zoom = 1;
     camera.x = rect.width / 2 - WORLD.width / 2;
     camera.y = rect.height / 2 - WORLD.height / 2;
     updateViewportTransform();
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  if (key === 'z') {
+    event.preventDefault();
+    if (event.shiftKey) redo();
+    else undo();
+    return;
+  }
+
+  if (key === 'y') {
+    event.preventDefault();
+    redo();
+    return;
+  }
+
+  if (key === 'c' && selectedImageId) {
+    event.preventDefault();
+    copiedImagePayload = getImagePayload(selectedImageId);
+    return;
+  }
+
+  if (key === 'v' && copiedImagePayload) {
+    event.preventDefault();
+    const payload = {
+      ...copiedImagePayload,
+      id: crypto.randomUUID(),
+      x: copiedImagePayload.x + 24,
+      y: copiedImagePayload.y + 24,
+    };
+    placeImage(payload);
+    recordImageAdd(payload);
+  }
+});
+
+window.addEventListener('keydown', (event) => {
+  if (isTypingTarget(event.target)) return;
+  if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImageId) {
+    event.preventDefault();
+    const payload = getImagePayload(selectedImageId);
+    if (!payload) return;
+    removeImage(selectedImageId);
+    recordImageDelete(payload);
   }
 });
 
@@ -361,16 +647,7 @@ colorPicker.addEventListener('change', () => {
   renderPresence();
 });
 
-toolButtons.forEach((btn) => {
-  btn.addEventListener('click', () => setTool(btn.dataset.tool));
-});
-
-imageInput.addEventListener('change', (event) => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  importImageFile(file, { x: 30, y: 30 });
-  event.target.value = '';
-});
+toolButtons.forEach((btn) => btn.addEventListener('click', () => setTool(btn.dataset.tool)));
 
 function importImageFile(file, point = { x: 30, y: 30 }) {
   if (!file || !file.type.startsWith('image/')) return;
@@ -384,35 +661,53 @@ function importImageFile(file, point = { x: 30, y: 30 }) {
       width: 220,
     };
     placeImage(payload);
-    broadcast('image-add', payload);
+    recordImageAdd(payload);
   };
   reader.readAsDataURL(file);
 }
 
+imageInput.addEventListener('change', (event) => {
+  const files = [...(event.target.files || [])];
+  files.forEach((file, i) => importImageFile(file, { x: 30 + i * 26, y: 30 + i * 26 }));
+  event.target.value = '';
+});
+
 board.addEventListener('dragover', (event) => {
-  event.preventDefault();
+  if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault();
 });
 
 board.addEventListener('drop', (event) => {
   event.preventDefault();
-  const file = event.dataTransfer?.files?.[0];
-  if (!file) return;
+  const files = [...(event.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
   const world = eventToWorld(event);
-  importImageFile(file, {
-    x: world.x - 110,
-    y: world.y - 60,
-  });
+  files.forEach((file, i) => importImageFile(file, { x: world.x - 110 + i * 20, y: world.y - 60 + i * 20 }));
+});
+
+window.addEventListener('paste', (event) => {
+  if (isTypingTarget(event.target)) return;
+  const files = [...(event.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+  if (!files.length) return;
+
+  event.preventDefault();
+  const rect = board.getBoundingClientRect();
+  const centerWorld = {
+    x: (rect.width / 2 - camera.x) / camera.zoom,
+    y: (rect.height / 2 - camera.y) / camera.zoom,
+  };
+  files.forEach((file, i) => importImageFile(file, { x: centerWorld.x - 120 + i * 24, y: centerWorld.y - 70 + i * 24 }));
 });
 
 clearCanvasBtn.addEventListener('click', () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  broadcast('clear-drawing');
+  const previous = strokes.slice();
+  recordClearDrawing(previous);
+  history[historyIndex].redo();
 });
 
 resetBoardBtn.addEventListener('click', () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  imageLayer.innerHTML = '';
-  broadcast('reset-all');
+  const prevStrokes = strokes.slice();
+  const prevImages = serializeImages();
+  recordResetBoard(prevStrokes, prevImages);
+  history[historyIndex].redo();
 });
 
 channel.onmessage = (event) => {
@@ -424,15 +719,11 @@ channel.onmessage = (event) => {
   if (type === 'reset-all') {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     imageLayer.innerHTML = '';
+    setSelectedImage(null);
   }
-  if (type === 'image-add') placeImage(payload);
-  if (type === 'image-move') {
-    const img = imageLayer.querySelector(`[data-id="${payload.id}"]`);
-    if (img) {
-      img.style.left = `${payload.x}px`;
-      img.style.top = `${payload.y}px`;
-    }
-  }
+  if (type === 'image-update') placeImage(payload, { silent: true });
+  if (type === 'image-remove') removeImage(payload.id, { silent: true });
+
   if (type === 'presence' && payload?.user) {
     peers.set(payload.user.id, payload.user);
     renderPresence();
@@ -442,6 +733,7 @@ channel.onmessage = (event) => {
 setTool('pen');
 syncPresence();
 renderPresence();
+
 setInterval(() => {
   syncPresence();
   renderPresence();
@@ -450,5 +742,6 @@ setInterval(() => {
 window.addEventListener('blur', () => {
   isSpacePressed = false;
   panSession = null;
+  interaction = null;
   updateCursor();
 });
