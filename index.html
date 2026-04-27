@@ -27,7 +27,11 @@
 
           <label>
             색상
-            <input id="colorPicker" type="color" value="#4f46e5" />
+            <button id="colorButton" type="button" class="color-button" aria-label="브러시 색상 선택">
+              <span id="colorSwatch" class="color-swatch" aria-hidden="true"></span>
+              <span>색 선택</span>
+            </button>
+            <input id="colorPicker" type="color" value="#4f46e5" class="sr-only-color" />
           </label>
 
           <label>
