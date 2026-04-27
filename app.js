@@ -213,20 +213,37 @@ function strokeToPathD(points) {
   return d;
 }
 
+const strokePathMap = new Map();
+
 function renderStroke(stroke) {
-  if (!stroke.pathEl) {
-    stroke.pathEl = createSvgPath(stroke);
-    drawLayer.appendChild(stroke.pathEl);
+  let path = strokePathMap.get(stroke.id);
+  if (!path) {
+    path = createSvgPath(stroke);
+    drawLayer.appendChild(path);
+    strokePathMap.set(stroke.id, path);
+  } else {
+    path.setAttribute('stroke-width', String(stroke.size));
+    path.setAttribute('stroke', stroke.color);
   }
-  stroke.pathEl.setAttribute('d', strokeToPathD(stroke.points));
+  path.setAttribute('d', strokeToPathD(stroke.points));
+  stroke.pathEl = path;
+}
+
+function removeStrokePath(id) {
+  const path = strokePathMap.get(id);
+  if (path) {
+    path.remove();
+    strokePathMap.delete(id);
+  }
 }
 
 function renderDrawingFromOps() {
   drawLayer.innerHTML = '';
-  drawingOps.forEach((stroke) => {
-    const rendered = { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
-    renderStroke(rendered);
-  });
+  strokePathMap.clear();
+  drawingOps.forEach((stroke) => renderStroke(stroke));
+  for (const live of liveStrokes.values()) {
+    if (!strokePathMap.has(live.id)) renderStroke(live);
+  }
 }
 
 function pointToSegmentDistance(point, start, end) {
@@ -245,104 +262,166 @@ function pointToSegmentDistance(point, start, end) {
   return Math.hypot(point.x - projX, point.y - projY);
 }
 
-function strokeTouchesPoint(stroke, point, radius) {
-  if (!stroke?.points?.length) return false;
-  const hitRadius = radius + stroke.size / 2;
-  if (stroke.points.length === 1) {
-    const only = stroke.points[0];
-    return Math.hypot(point.x - only.x, point.y - only.y) <= hitRadius;
-  }
-  for (let i = 1; i < stroke.points.length; i += 1) {
-    const start = stroke.points[i - 1];
-    const end = stroke.points[i];
-    if (pointToSegmentDistance(point, start, end) <= hitRadius) {
-      return true;
-    }
-  }
-  return false;
+function getEraserRadius() {
+  return Number(brushSize.value || 4) / 2;
 }
 
-function splitStrokeByEraser(stroke, point, radius) {
+function makeCapsuleTester(A, B, R) {
+  const ax = A.x;
+  const ay = A.y;
+  const vx = B.x - A.x;
+  const vy = B.y - A.y;
+  const lenSq = vx * vx + vy * vy;
+  const r2 = R * R;
+  if (lenSq === 0) {
+    return (px, py) => {
+      const dx = px - ax;
+      const dy = py - ay;
+      return dx * dx + dy * dy <= r2;
+    };
+  }
+  return (px, py) => {
+    const dx = px - ax;
+    const dy = py - ay;
+    let t = (dx * vx + dy * vy) / lenSq;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const cx = dx - t * vx;
+    const cy = dy - t * vy;
+    return cx * cx + cy * cy <= r2;
+  };
+}
+
+function clipStrokeByCapsule(stroke, A, B, R) {
   if (!stroke?.points?.length) return [];
-  const hitRadius = radius + stroke.size / 2;
+  const points = stroke.points;
+  const strokeR = stroke.size / 2;
+  const totalR = R + strokeR;
 
-  if (stroke.points.length === 1) {
-    const only = stroke.points[0];
-    return Math.hypot(point.x - only.x, point.y - only.y) <= hitRadius ? [] : [stroke];
+  const capMinX = Math.min(A.x, B.x) - totalR;
+  const capMaxX = Math.max(A.x, B.x) + totalR;
+  const capMinY = Math.min(A.y, B.y) - totalR;
+  const capMaxY = Math.max(A.y, B.y) + totalR;
+
+  let sMinX = Infinity;
+  let sMaxX = -Infinity;
+  let sMinY = Infinity;
+  let sMaxY = -Infinity;
+  for (const p of points) {
+    if (p.x < sMinX) sMinX = p.x;
+    if (p.x > sMaxX) sMaxX = p.x;
+    if (p.y < sMinY) sMinY = p.y;
+    if (p.y > sMaxY) sMaxY = p.y;
+  }
+  sMinX -= strokeR;
+  sMaxX += strokeR;
+  sMinY -= strokeR;
+  sMaxY += strokeR;
+  if (sMaxX < capMinX || sMinX > capMaxX || sMaxY < capMinY || sMinY > capMaxY) {
+    return [stroke];
   }
 
+  const insideCapsule = makeCapsuleTester(A, B, totalR);
+
+  if (points.length === 1) {
+    const p = points[0];
+    return insideCapsule(p.x, p.y) ? [] : [stroke];
+  }
+
+  const minStep = Math.max(0.5, totalR * 0.25);
   const fragments = [];
-  let fragmentPoints = null;
+  let current = [];
+  let modified = false;
 
-  for (let i = 1; i < stroke.points.length; i += 1) {
-    const start = stroke.points[i - 1];
-    const end = stroke.points[i];
-    const segmentErased = pointToSegmentDistance(point, start, end) <= hitRadius;
-
-    if (segmentErased) {
-      fragmentPoints = null;
-      continue;
-    }
-
-    if (!fragmentPoints) {
-      fragmentPoints = [{ ...start }, { ...end }];
-      fragments.push(fragmentPoints);
-      continue;
-    }
-
-    fragmentPoints.push({ ...end });
+  let prevInside = insideCapsule(points[0].x, points[0].y);
+  if (!prevInside) {
+    current.push({ x: points[0].x, y: points[0].y });
+  } else {
+    modified = true;
   }
 
-  return fragments.map((points, index) => ({
+  for (let i = 1; i < points.length; i += 1) {
+    const S = points[i - 1];
+    const E = points[i];
+    const eIn = insideCapsule(E.x, E.y);
+
+    const segMinX = Math.min(S.x, E.x);
+    const segMaxX = Math.max(S.x, E.x);
+    const segMinY = Math.min(S.y, E.y);
+    const segMaxY = Math.max(S.y, E.y);
+    const segOutsideBox =
+      segMaxX < capMinX || segMinX > capMaxX || segMaxY < capMinY || segMinY > capMaxY;
+
+    if (!prevInside && !eIn && segOutsideBox) {
+      current.push({ x: E.x, y: E.y });
+      continue;
+    }
+
+    const dx = E.x - S.x;
+    const dy = E.y - S.y;
+    const segLen = Math.hypot(dx, dy);
+    const nSub = Math.max(2, Math.ceil(segLen / minStep));
+
+    for (let k = 1; k <= nSub; k += 1) {
+      const t = k / nSub;
+      const px = S.x + dx * t;
+      const py = S.y + dy * t;
+      const inside = insideCapsule(px, py);
+
+      if (inside) {
+        if (!prevInside) {
+          if (current.length >= 2) fragments.push(current);
+          current = [];
+        }
+        modified = true;
+      } else {
+        current.push({ x: px, y: py });
+      }
+      prevInside = inside;
+    }
+  }
+
+  if (current.length >= 2) fragments.push(current);
+
+  if (!modified) return [stroke];
+
+  return fragments.map((pts, idx) => ({
     ...stroke,
-    id: `${stroke.id}-frag-${index}-${crypto.randomUUID().slice(0, 8)}`,
-    points,
+    id: `${stroke.id}::frag-${idx}-${crypto.randomUUID().slice(0, 8)}`,
+    points: pts,
+    pathEl: undefined,
   }));
 }
 
-function eraseAtPoint(point, radius = Number(brushSize.value), { render = true } = {}) {
-  const before = drawingOps.length;
-  drawingOps = drawingOps.flatMap((stroke) => {
-    if (!strokeTouchesPoint(stroke, point, radius)) return [stroke];
-    return splitStrokeByEraser(stroke, point, radius);
-  });
-
-  if (drawingOps.length !== before) {
-    if (render) {
-      renderDrawingFromOps();
-    }
-    return true;
-  }
-  return false;
-}
-
-function eraseAlongSegment(from, to, radius = Number(brushSize.value)) {
+function eraseWithCapsule(from, to, radius = getEraserRadius()) {
   if (!from || !to) return false;
-  const distance = Math.hypot(to.x - from.x, to.y - from.y);
-  if (distance === 0) {
-    return eraseAtPoint(to, radius);
-  }
+  if (!drawingOps.length) return false;
 
-  const step = Math.max(1.5, radius * 0.8);
-  const steps = Math.max(1, Math.ceil(distance / step));
+  const removedIds = [];
+  const replacements = [];
+  const next = [];
   let changed = false;
 
-  for (let i = 0; i <= steps; i += 1) {
-    const t = i / steps;
-    const point = {
-      x: from.x + (to.x - from.x) * t,
-      y: from.y + (to.y - from.y) * t,
-    };
-    if (eraseAtPoint(point, radius, { render: false })) {
-      changed = true;
+  for (let i = 0; i < drawingOps.length; i += 1) {
+    const stroke = drawingOps[i];
+    const fragments = clipStrokeByCapsule(stroke, from, to, radius);
+    if (fragments.length === 1 && fragments[0] === stroke) {
+      next.push(stroke);
+      continue;
     }
+    removedIds.push(stroke.id);
+    for (const frag of fragments) {
+      next.push(frag);
+      replacements.push(frag);
+    }
+    changed = true;
   }
 
-  if (changed) {
-    renderDrawingFromOps();
-  }
-
-  return changed;
+  if (!changed) return false;
+  drawingOps = next;
+  for (const id of removedIds) removeStrokePath(id);
+  for (const frag of replacements) renderStroke(frag);
+  return true;
 }
 
 function broadcast(type, payload = {}) {
@@ -616,10 +695,12 @@ function pointerDown(event) {
   if (activeTool === 'eraser') {
     isDrawing = true;
     lastPoint = eventToWorld(event);
-    eraseAtPoint(lastPoint);
+    const radius = getEraserRadius();
+    eraseWithCapsule(lastPoint, lastPoint, radius);
     lastEraserSyncPoint = { ...lastPoint };
-    broadcast('erase-point', {
-      point: lastPoint,
+    broadcast('erase-segment', {
+      from: lastPoint,
+      to: lastPoint,
       size: Number(brushSize.value),
     });
     lastEraserSyncAt = Date.now();
@@ -682,7 +763,7 @@ function pointerMove(event) {
     return;
   }
   if (activeTool === 'eraser') {
-    eraseAlongSegment(lastPoint, current);
+    eraseWithCapsule(lastPoint, current, getEraserRadius());
     const now = Date.now();
     if (now - lastEraserSyncAt >= ERASER_SYNC_THROTTLE_MS) {
       broadcast('erase-segment', {
@@ -1140,10 +1221,12 @@ channel.onmessage = (event) => {
     renderDrawingFromOps();
   }
   if (type === 'erase-point' && payload?.point) {
-    eraseAtPoint(payload.point, Number(payload.size || 4));
+    const r = Number(payload.size || 4) / 2;
+    eraseWithCapsule(payload.point, payload.point, r);
   }
   if (type === 'erase-segment' && payload?.from && payload?.to) {
-    eraseAlongSegment(payload.from, payload.to, Number(payload.size || 4));
+    const r = Number(payload.size || 4) / 2;
+    eraseWithCapsule(payload.from, payload.to, r);
   }
   if (type === 'reset-all') {
     drawingOps = [];
