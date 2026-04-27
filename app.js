@@ -772,6 +772,17 @@ function importImageFile(file, point = { x: 30, y: 30 }) {
   reader.readAsDataURL(file);
 }
 
+function uniqueImageFiles(files) {
+  const seen = new Set();
+  return files.filter((file) => {
+    if (!file || !file.type.startsWith('image/')) return false;
+    const key = [file.name, file.type, file.size, file.lastModified].join('::');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 board.addEventListener('dragover', (event) => {
   if ([...(event.dataTransfer?.types || [])].includes('Files')) {
     event.preventDefault();
@@ -798,9 +809,7 @@ window.addEventListener('paste', (event) => {
     .filter((item) => item.type.startsWith('image/'))
     .map((item) => item.getAsFile())
     .filter(Boolean);
-  const files = [...(event.clipboardData?.files || []), ...itemFiles].filter((file) =>
-    file.type.startsWith('image/'),
-  );
+  const files = uniqueImageFiles([...(event.clipboardData?.files || []), ...itemFiles]);
   if (!files.length) return;
 
   event.preventDefault();
