@@ -9,6 +9,8 @@ const toolCursor = document.getElementById('toolCursor');
 const presence = document.getElementById('presence');
 const displayNameInput = document.getElementById('displayName');
 const colorPicker = document.getElementById('colorPicker');
+const colorButton = document.getElementById('colorButton');
+const colorSwatch = document.getElementById('colorSwatch');
 const brushSize = document.getElementById('brushSize');
 const imageInput = document.getElementById('imageInput');
 const clearCanvasBtn = document.getElementById('clearCanvas');
@@ -47,6 +49,8 @@ let drawingOps = [];
 let historyFingerprint = '';
 let activeStroke = null;
 const liveStrokes = new Map();
+const ERASER_SYNC_THROTTLE_MS = 24;
+let lastEraserSyncAt = 0;
 
 const camera = {
   x: 0,
@@ -184,7 +188,7 @@ function createSvgPath(stroke) {
   path.setAttribute('stroke-linecap', 'round');
   path.setAttribute('stroke-linejoin', 'round');
   path.setAttribute('stroke-width', String(stroke.size));
-  path.setAttribute('stroke', stroke.tool === 'eraser' ? '#f8fafc' : stroke.color);
+  path.setAttribute('stroke', stroke.color);
   return path;
 }
 
@@ -222,6 +226,49 @@ function renderDrawingFromOps() {
     const rendered = { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
     renderStroke(rendered);
   });
+}
+
+function pointToSegmentDistance(point, start, end) {
+  const vx = end.x - start.x;
+  const vy = end.y - start.y;
+  if (vx === 0 && vy === 0) {
+    return Math.hypot(point.x - start.x, point.y - start.y);
+  }
+  const t = clamp(
+    ((point.x - start.x) * vx + (point.y - start.y) * vy) / (vx * vx + vy * vy),
+    0,
+    1,
+  );
+  const projX = start.x + t * vx;
+  const projY = start.y + t * vy;
+  return Math.hypot(point.x - projX, point.y - projY);
+}
+
+function strokeTouchesPoint(stroke, point, radius) {
+  if (!stroke?.points?.length) return false;
+  const hitRadius = radius + stroke.size / 2;
+  if (stroke.points.length === 1) {
+    const only = stroke.points[0];
+    return Math.hypot(point.x - only.x, point.y - only.y) <= hitRadius;
+  }
+  for (let i = 1; i < stroke.points.length; i += 1) {
+    const start = stroke.points[i - 1];
+    const end = stroke.points[i];
+    if (pointToSegmentDistance(point, start, end) <= hitRadius) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function eraseAtPoint(point, radius = Number(brushSize.value)) {
+  const before = drawingOps.length;
+  drawingOps = drawingOps.filter((stroke) => !strokeTouchesPoint(stroke, point, radius));
+  if (drawingOps.length !== before) {
+    renderDrawingFromOps();
+    return true;
+  }
+  return false;
 }
 
 function broadcast(type, payload = {}) {
@@ -492,6 +539,17 @@ function pointerDown(event) {
 
   if (event.button !== 0) return;
   if (activeTool === 'select') return;
+  if (activeTool === 'eraser') {
+    isDrawing = true;
+    lastPoint = eventToWorld(event);
+    eraseAtPoint(lastPoint);
+    broadcast('erase-point', {
+      point: lastPoint,
+      size: Number(brushSize.value),
+    });
+    lastEraserSyncAt = Date.now();
+    return;
+  }
   isDrawing = true;
   lastPoint = eventToWorld(event);
   activeStroke = {
@@ -545,9 +603,23 @@ function pointerMove(event) {
   const dx = current.x - lastPoint.x;
   const dy = current.y - lastPoint.y;
   const distance = Math.hypot(dx, dy);
-  if (distance < 0.3 || !activeStroke) {
+  if (distance < 0.3) {
     return;
   }
+  if (activeTool === 'eraser') {
+    eraseAtPoint(current);
+    const now = Date.now();
+    if (now - lastEraserSyncAt >= ERASER_SYNC_THROTTLE_MS) {
+      broadcast('erase-point', {
+        point: current,
+        size: Number(brushSize.value),
+      });
+      lastEraserSyncAt = now;
+    }
+    lastPoint = current;
+    return;
+  }
+  if (!activeStroke) return;
   activeStroke.points.push({ ...current });
   renderStroke(activeStroke);
   broadcast('stroke-append', {
@@ -573,6 +645,13 @@ function pointerUp(event) {
   }
 
   if (isDrawing && event.button === 0) {
+    if (activeTool === 'eraser') {
+      pushHistory('erase-stroke');
+      isDrawing = false;
+      lastPoint = null;
+      activeStroke = null;
+      return;
+    }
     if (activeStroke) {
       drawingOps.push({
         id: activeStroke.id,
@@ -784,8 +863,19 @@ displayNameInput.addEventListener('input', () => {
 });
 
 colorPicker.value = me.color;
+if (colorSwatch) {
+  colorSwatch.style.background = me.color;
+}
+if (colorButton) {
+  colorButton.addEventListener('click', () => {
+    colorPicker.click();
+  });
+}
 colorPicker.addEventListener('change', () => {
   me.color = colorPicker.value;
+  if (colorSwatch) {
+    colorSwatch.style.background = me.color;
+  }
   syncPresence();
   renderPresence();
 });
@@ -956,6 +1046,9 @@ channel.onmessage = (event) => {
     drawingOps = [];
     liveStrokes.clear();
     renderDrawingFromOps();
+  }
+  if (type === 'erase-point' && payload?.point) {
+    eraseAtPoint(payload.point, Number(payload.size || 4));
   }
   if (type === 'reset-all') {
     drawingOps = [];
