@@ -261,9 +261,51 @@ function strokeTouchesPoint(stroke, point, radius) {
   return false;
 }
 
+function splitStrokeByEraser(stroke, point, radius) {
+  if (!stroke?.points?.length) return [];
+  const hitRadius = radius + stroke.size / 2;
+
+  if (stroke.points.length === 1) {
+    const only = stroke.points[0];
+    return Math.hypot(point.x - only.x, point.y - only.y) <= hitRadius ? [] : [stroke];
+  }
+
+  const fragments = [];
+  let fragmentPoints = null;
+
+  for (let i = 1; i < stroke.points.length; i += 1) {
+    const start = stroke.points[i - 1];
+    const end = stroke.points[i];
+    const segmentErased = pointToSegmentDistance(point, start, end) <= hitRadius;
+
+    if (segmentErased) {
+      fragmentPoints = null;
+      continue;
+    }
+
+    if (!fragmentPoints) {
+      fragmentPoints = [{ ...start }, { ...end }];
+      fragments.push(fragmentPoints);
+      continue;
+    }
+
+    fragmentPoints.push({ ...end });
+  }
+
+  return fragments.map((points, index) => ({
+    ...stroke,
+    id: `${stroke.id}-frag-${index}-${crypto.randomUUID().slice(0, 8)}`,
+    points,
+  }));
+}
+
 function eraseAtPoint(point, radius = Number(brushSize.value)) {
   const before = drawingOps.length;
-  drawingOps = drawingOps.filter((stroke) => !strokeTouchesPoint(stroke, point, radius));
+  drawingOps = drawingOps.flatMap((stroke) => {
+    if (!strokeTouchesPoint(stroke, point, radius)) return [stroke];
+    return splitStrokeByEraser(stroke, point, radius);
+  });
+
   if (drawingOps.length !== before) {
     renderDrawingFromOps();
     return true;
@@ -862,6 +904,15 @@ displayNameInput.addEventListener('input', () => {
   renderPresence();
 });
 
+function applySelectedColor(nextColor) {
+  me.color = nextColor;
+  if (colorSwatch) {
+    colorSwatch.style.background = me.color;
+  }
+  syncPresence();
+  renderPresence();
+}
+
 colorPicker.value = me.color;
 if (colorSwatch) {
   colorSwatch.style.background = me.color;
@@ -871,13 +922,11 @@ if (colorButton) {
     colorPicker.click();
   });
 }
+colorPicker.addEventListener('input', () => {
+  applySelectedColor(colorPicker.value);
+});
 colorPicker.addEventListener('change', () => {
-  me.color = colorPicker.value;
-  if (colorSwatch) {
-    colorSwatch.style.background = me.color;
-  }
-  syncPresence();
-  renderPresence();
+  applySelectedColor(colorPicker.value);
 });
 
 brushSize.addEventListener('input', () => {
