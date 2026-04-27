@@ -1,0 +1,10 @@
+{
+  "name": "live-board-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Live Board MVP with cross-device real-time sync",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
