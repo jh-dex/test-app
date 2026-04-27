@@ -51,6 +51,7 @@ let activeStroke = null;
 const liveStrokes = new Map();
 const ERASER_SYNC_THROTTLE_MS = 24;
 let lastEraserSyncAt = 0;
+let lastEraserSyncPoint = null;
 
 const camera = {
   x: 0,
@@ -299,7 +300,7 @@ function splitStrokeByEraser(stroke, point, radius) {
   }));
 }
 
-function eraseAtPoint(point, radius = Number(brushSize.value)) {
+function eraseAtPoint(point, radius = Number(brushSize.value), { render = true } = {}) {
   const before = drawingOps.length;
   drawingOps = drawingOps.flatMap((stroke) => {
     if (!strokeTouchesPoint(stroke, point, radius)) return [stroke];
@@ -307,10 +308,41 @@ function eraseAtPoint(point, radius = Number(brushSize.value)) {
   });
 
   if (drawingOps.length !== before) {
-    renderDrawingFromOps();
+    if (render) {
+      renderDrawingFromOps();
+    }
     return true;
   }
   return false;
+}
+
+function eraseAlongSegment(from, to, radius = Number(brushSize.value)) {
+  if (!from || !to) return false;
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  if (distance === 0) {
+    return eraseAtPoint(to, radius);
+  }
+
+  const step = Math.max(1.5, radius * 0.8);
+  const steps = Math.max(1, Math.ceil(distance / step));
+  let changed = false;
+
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    const point = {
+      x: from.x + (to.x - from.x) * t,
+      y: from.y + (to.y - from.y) * t,
+    };
+    if (eraseAtPoint(point, radius, { render: false })) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    renderDrawingFromOps();
+  }
+
+  return changed;
 }
 
 function broadcast(type, payload = {}) {
@@ -585,6 +617,7 @@ function pointerDown(event) {
     isDrawing = true;
     lastPoint = eventToWorld(event);
     eraseAtPoint(lastPoint);
+    lastEraserSyncPoint = { ...lastPoint };
     broadcast('erase-point', {
       point: lastPoint,
       size: Number(brushSize.value),
@@ -649,13 +682,15 @@ function pointerMove(event) {
     return;
   }
   if (activeTool === 'eraser') {
-    eraseAtPoint(current);
+    eraseAlongSegment(lastPoint, current);
     const now = Date.now();
     if (now - lastEraserSyncAt >= ERASER_SYNC_THROTTLE_MS) {
-      broadcast('erase-point', {
-        point: current,
+      broadcast('erase-segment', {
+        from: lastEraserSyncPoint || lastPoint,
+        to: current,
         size: Number(brushSize.value),
       });
+      lastEraserSyncPoint = { ...current };
       lastEraserSyncAt = now;
     }
     lastPoint = current;
@@ -688,9 +723,17 @@ function pointerUp(event) {
 
   if (isDrawing && event.button === 0) {
     if (activeTool === 'eraser') {
+      if (lastEraserSyncPoint && lastPoint) {
+        broadcast('erase-segment', {
+          from: lastEraserSyncPoint,
+          to: lastPoint,
+          size: Number(brushSize.value),
+        });
+      }
       pushHistory('erase-stroke');
       isDrawing = false;
       lastPoint = null;
+      lastEraserSyncPoint = null;
       activeStroke = null;
       return;
     }
@@ -1099,6 +1142,9 @@ channel.onmessage = (event) => {
   if (type === 'erase-point' && payload?.point) {
     eraseAtPoint(payload.point, Number(payload.size || 4));
   }
+  if (type === 'erase-segment' && payload?.from && payload?.to) {
+    eraseAlongSegment(payload.from, payload.to, Number(payload.size || 4));
+  }
   if (type === 'reset-all') {
     drawingOps = [];
     liveStrokes.clear();
@@ -1139,6 +1185,7 @@ window.addEventListener('blur', () => {
   interaction = null;
   isDrawing = false;
   lastPoint = null;
+  lastEraserSyncPoint = null;
   activeStroke = null;
   hideToolCursor();
   updateCursor();
