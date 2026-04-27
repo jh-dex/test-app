@@ -5,6 +5,7 @@ const viewport = document.getElementById('viewport');
 const drawLayer = document.getElementById('drawLayer');
 const imageLayer = document.getElementById('imageLayer');
 const zoomBadge = document.getElementById('zoomBadge');
+const toolCursor = document.getElementById('toolCursor');
 const presence = document.getElementById('presence');
 const displayNameInput = document.getElementById('displayName');
 const colorPicker = document.getElementById('colorPicker');
@@ -95,17 +96,53 @@ function updateCursor() {
   const isPanning = Boolean(panSession);
   if (isPanning) {
     board.style.cursor = 'grabbing';
+    hideToolCursor();
     return;
   }
   if (isSpacePressed) {
     board.style.cursor = 'grab';
+    hideToolCursor();
     return;
   }
   if (activeTool === 'select') {
     board.style.cursor = 'default';
+    hideToolCursor();
     return;
   }
-  board.style.cursor = activeTool === 'eraser' ? 'cell' : 'crosshair';
+  board.style.cursor = 'none';
+}
+
+function updateToolCursorSize() {
+  if (!toolCursor) return;
+  const size = Number(brushSize.value || 4) * camera.zoom;
+  const safeSize = Math.max(4, size);
+  toolCursor.style.width = `${safeSize}px`;
+  toolCursor.style.height = `${safeSize}px`;
+}
+
+function showToolCursor(clientX, clientY) {
+  if (!toolCursor) return;
+  if (activeTool === 'select' || isSpacePressed || panSession) {
+    hideToolCursor();
+    return;
+  }
+  const rect = board.getBoundingClientRect();
+  toolCursor.style.left = `${clientX - rect.left}px`;
+  toolCursor.style.top = `${clientY - rect.top}px`;
+  toolCursor.classList.add('is-visible');
+}
+
+function hideToolCursor() {
+  if (!toolCursor) return;
+  toolCursor.classList.remove('is-visible');
+}
+
+function updateImageInteractivity() {
+  const canInteractImages = activeTool === 'select';
+  imageLayer.querySelectorAll('.image-item').forEach((item) => {
+    item.style.pointerEvents = canInteractImages ? 'auto' : 'none';
+    item.style.cursor = canInteractImages ? 'grab' : 'default';
+  });
 }
 
 function updateZoomUI() {
@@ -114,6 +151,7 @@ function updateZoomUI() {
 
 function updateViewportTransform() {
   viewport.style.transform = `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`;
+  updateToolCursorSize();
   updateZoomUI();
 }
 
@@ -226,6 +264,8 @@ function setTool(toolName) {
   toolButtons.forEach((btn) => {
     btn.classList.toggle('is-active', btn.dataset.tool === toolName);
   });
+  updateImageInteractivity();
+  updateToolCursorSize();
   updateCursor();
 }
 
@@ -296,6 +336,7 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
   if (isNew) {
     imageLayer.appendChild(item);
   }
+  updateImageInteractivity();
   syncImageZIndices();
   setSelectedImage(id);
 
@@ -422,7 +463,7 @@ function pointerDown(event) {
   }
 
   const item = event.target.closest('.image-item');
-  if (item) {
+  if (item && activeTool === 'select') {
     event.preventDefault();
     const id = item.dataset.id;
     setSelectedImage(id);
@@ -472,6 +513,8 @@ function pointerDown(event) {
 }
 
 function pointerMove(event) {
+  showToolCursor(event.clientX, event.clientY);
+
   if (panSession && event.pointerId === panSession.pointerId) {
     camera.x = panSession.originX + (event.clientX - panSession.startX);
     camera.y = panSession.originY + (event.clientY - panSession.startY);
@@ -585,6 +628,10 @@ layerButtons.forEach((btn) => {
 
 board.addEventListener('pointerdown', pointerDown);
 board.addEventListener('pointermove', pointerMove);
+board.addEventListener('pointerenter', (event) => {
+  showToolCursor(event.clientX, event.clientY);
+});
+board.addEventListener('pointerleave', hideToolCursor);
 window.addEventListener('pointerup', pointerUp);
 board.addEventListener(
   'wheel',
@@ -741,6 +788,10 @@ colorPicker.addEventListener('change', () => {
   me.color = colorPicker.value;
   syncPresence();
   renderPresence();
+});
+
+brushSize.addEventListener('input', () => {
+  updateToolCursorSize();
 });
 
 toolButtons.forEach((btn) => {
@@ -947,5 +998,6 @@ window.addEventListener('blur', () => {
   isDrawing = false;
   lastPoint = null;
   activeStroke = null;
+  hideToolCursor();
   updateCursor();
 });
