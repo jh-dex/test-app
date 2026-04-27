@@ -214,7 +214,7 @@ kbd {
 
 .draw-layer {
   pointer-events: none;
-  z-index: 1;
+  z-index: 3;
   overflow: visible;
 }
 
