@@ -108,6 +108,31 @@ button {
   padding: 0.55rem 0.7rem;
 }
 
+.color-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.color-swatch {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.65) inset;
+  flex: 0 0 1rem;
+}
+
+.sr-only-color {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+}
+
 input[type='range'] {
   padding: 0;
 }
