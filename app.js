@@ -1,4 +1,10 @@
-const channel = new BroadcastChannel('live-board-mvp');
+const BROADCAST_CHANNEL_NAME = 'live-board-mvp';
+const SYNC_RETRY_MS = 1500;
+const seenMessageIds = new Set();
+const seenMessageOrder = [];
+const SEEN_MESSAGE_LIMIT = 4000;
+const channel =
+  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(BROADCAST_CHANNEL_NAME) : null;
 
 const board = document.getElementById('board');
 const viewport = document.getElementById('viewport');
@@ -59,6 +65,109 @@ const camera = {
   zoom: 1,
 };
 const peers = new Map();
+const syncState = {
+  source: null,
+  timer: null,
+};
+
+function resolveSyncBaseUrl() {
+  const param = new URLSearchParams(window.location.search).get('sync');
+  if (param) {
+    try {
+      return new URL(param, window.location.href).toString().replace(/\/$/, '');
+    } catch {
+      return null;
+    }
+  }
+
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+    return window.location.origin;
+  }
+  return null;
+}
+
+function rememberMessageId(id) {
+  if (!id || seenMessageIds.has(id)) return;
+  seenMessageIds.add(id);
+  seenMessageOrder.push(id);
+  if (seenMessageOrder.length > SEEN_MESSAGE_LIMIT) {
+    const staleId = seenMessageOrder.shift();
+    if (staleId) seenMessageIds.delete(staleId);
+  }
+}
+
+function isKnownMessage(id) {
+  return Boolean(id && seenMessageIds.has(id));
+}
+
+function normalizeInboundMessage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const { id, type, source, payload, sentAt } = raw;
+  if (!type || !source) return null;
+  return {
+    id: id || crypto.randomUUID(),
+    type,
+    source,
+    payload,
+    sentAt: sentAt || Date.now(),
+  };
+}
+
+function connectSyncStream() {
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) return;
+
+  const source = new EventSource(`${baseUrl}/events`);
+  syncState.source = source;
+
+  source.addEventListener('open', () => {
+    if (syncState.timer) {
+      clearTimeout(syncState.timer);
+      syncState.timer = null;
+    }
+    syncPresence();
+  });
+
+  source.addEventListener('message', (event) => {
+    try {
+      const parsed = JSON.parse(event.data);
+      const message = normalizeInboundMessage(parsed);
+      if (message) handleRealtimeMessage(message);
+    } catch {
+      // ignore malformed payloads
+    }
+  });
+
+  source.addEventListener('error', () => {
+    if (syncState.source === source) {
+      syncState.source = null;
+      source.close();
+    }
+    if (!syncState.timer) {
+      syncState.timer = setTimeout(() => {
+        syncState.timer = null;
+        connectSyncStream();
+      }, SYNC_RETRY_MS);
+    }
+  });
+}
+
+function emitRealtimeMessage(message) {
+  if (channel) {
+    channel.postMessage(message);
+  }
+
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) return;
+  fetch(`${baseUrl}/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message),
+    keepalive: true,
+  }).catch(() => {
+    // ignore transport errors; local channel still works
+  });
+}
 
 function resizeCanvas() {
   drawLayer.setAttribute('viewBox', `0 0 ${WORLD.width} ${WORLD.height}`);
@@ -425,12 +534,15 @@ function eraseWithCapsule(from, to, radius = getEraserRadius()) {
 }
 
 function broadcast(type, payload = {}) {
-  channel.postMessage({
+  const message = {
+    id: crypto.randomUUID(),
     type,
     source: clientId,
     payload,
     sentAt: Date.now(),
-  });
+  };
+  rememberMessageId(message.id);
+  emitRealtimeMessage(message);
 }
 
 function syncPresence() {
@@ -1169,8 +1281,12 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
-channel.onmessage = (event) => {
-  const { type, source, payload } = event.data || {};
+function handleRealtimeMessage(message) {
+  if (!message) return;
+  if (isKnownMessage(message.id)) return;
+  rememberMessageId(message.id);
+
+  const { type, source, payload } = message;
   if (source === clientId) return;
 
   if (type === 'stroke-start' && payload?.id && payload?.point) {
@@ -1251,7 +1367,16 @@ channel.onmessage = (event) => {
     peers.set(payload.user.id, payload.user);
     renderPresence();
   }
-};
+}
+
+if (channel) {
+  channel.onmessage = (event) => {
+    const message = normalizeInboundMessage(event.data);
+    if (message) handleRealtimeMessage(message);
+  };
+}
+
+connectSyncStream();
 
 setTool('pen');
 syncPresence();
