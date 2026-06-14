@@ -1369,7 +1369,11 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
   isRestoringHistory = false;
 
   if (broadcastRestore) {
+    // Live peers get the new state immediately...
     broadcast('board-state', state);
+    // ...and the server's stored snapshot is updated too, so a refresh or a
+    // late joiner also sees the result of this undo/redo.
+    scheduleStateSync();
   }
 }
 
