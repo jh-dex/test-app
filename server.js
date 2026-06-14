@@ -25,12 +25,30 @@ const clients = new Set();
 // the server keeps only the latest one and replays it to anyone who connects.
 let boardSnapshot = null;
 
+function dropClient(res) {
+  clients.delete(res);
+  try {
+    res.end();
+  } catch {
+    // already closed
+  }
+}
+
 function sendSse(res, payload) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  // Guard every write: a dead/half-open connection would otherwise throw and
+  // abort the broadcast loop, so clients later in the set silently miss the
+  // message (causes "some windows update, some don't"). Prune on failure.
+  try {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    return true;
+  } catch {
+    dropClient(res);
+    return false;
+  }
 }
 
 function broadcast(payload, exclude) {
-  for (const client of clients) {
+  for (const client of [...clients]) {
     if (client === exclude) continue;
     sendSse(client, payload);
   }
@@ -144,8 +162,12 @@ const server = http.createServer((req, res) => {
 });
 
 setInterval(() => {
-  for (const client of clients) {
-    client.write(': ping\n\n');
+  for (const client of [...clients]) {
+    try {
+      client.write(': ping\n\n');
+    } catch {
+      dropClient(client);
+    }
   }
 }, 20000);
 
