@@ -10,6 +10,8 @@ const board = document.getElementById('board');
 const viewport = document.getElementById('viewport');
 const drawLayer = document.getElementById('drawLayer');
 const imageLayer = document.getElementById('imageLayer');
+const compareLayer = document.getElementById('compareLayer');
+const textLayer = document.getElementById('textLayer');
 const zoomBadge = document.getElementById('zoomBadge');
 const toolCursor = document.getElementById('toolCursor');
 const presence = document.getElementById('presence');
@@ -18,7 +20,13 @@ const colorPicker = document.getElementById('colorPicker');
 const colorButton = document.getElementById('colorButton');
 const colorSwatch = document.getElementById('colorSwatch');
 const brushSize = document.getElementById('brushSize');
+const textSizeInput = document.getElementById('textSize');
+const textSizeValue = document.getElementById('textSizeValue');
+const textColorPicker = document.getElementById('textColorPicker');
+const textColorButton = document.getElementById('textColorButton');
+const textColorSwatch = document.getElementById('textColorSwatch');
 const imageInput = document.getElementById('imageInput');
+const makeCompareBtn = document.getElementById('makeCompare');
 const clearCanvasBtn = document.getElementById('clearCanvas');
 const resetBoardBtn = document.getElementById('resetBoard');
 const toolButtons = [...document.querySelectorAll('[data-tool]')];
@@ -45,12 +53,18 @@ let isDrawing = false;
 let lastPoint = null;
 let interaction = null;
 let selectedImageId = null;
+let selectedTextId = null;
+let textEditingId = null;
+const DEFAULT_TEXT_SIZE = 28;
+const selectedIds = new Set();
+let textColor = '#111827';
+let textSize = DEFAULT_TEXT_SIZE;
 let isSpacePressed = false;
 let panSession = null;
 let isRestoringHistory = false;
 const history = [];
 let historyIndex = -1;
-let copiedImagePayload = null;
+let clipboardElements = [];
 let drawingOps = [];
 let historyFingerprint = '';
 let activeStroke = null;
@@ -169,6 +183,41 @@ function emitRealtimeMessage(message) {
   });
 }
 
+// --- Authoritative state sync (for late joiners) ---------------------------
+// After every committed change we push a full snapshot to the server. The
+// server stores only the latest one and replays it to clients that connect
+// later, so anyone joining sees the current board. Debounced to avoid spamming.
+let stateSyncTimer = null;
+
+function sendStateToServer() {
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) return;
+  const snapshot = snapshotBoardState();
+  const message = {
+    id: crypto.randomUUID(),
+    type: 'state-store',
+    source: clientId,
+    payload: snapshot,
+    sentAt: Date.now(),
+  };
+  fetch(`${baseUrl}/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message),
+    keepalive: true,
+  }).catch(() => {
+    // ignore; live channel still works, snapshot will resend on next change
+  });
+}
+
+function scheduleStateSync() {
+  if (stateSyncTimer) clearTimeout(stateSyncTimer);
+  stateSyncTimer = setTimeout(() => {
+    stateSyncTimer = null;
+    sendStateToServer();
+  }, 400);
+}
+
 function resizeCanvas() {
   drawLayer.setAttribute('viewBox', `0 0 ${WORLD.width} ${WORLD.height}`);
   drawLayer.setAttribute('width', String(WORLD.width));
@@ -223,6 +272,11 @@ function updateCursor() {
     hideToolCursor();
     return;
   }
+  if (activeTool === 'text') {
+    board.style.cursor = 'text';
+    hideToolCursor();
+    return;
+  }
   board.style.cursor = 'none';
 }
 
@@ -236,7 +290,7 @@ function updateToolCursorSize() {
 
 function showToolCursor(clientX, clientY) {
   if (!toolCursor) return;
-  if (activeTool === 'select' || isSpacePressed || panSession) {
+  if (activeTool === 'select' || activeTool === 'text' || isSpacePressed || panSession) {
     hideToolCursor();
     return;
   }
@@ -255,7 +309,7 @@ function updateImageInteractivity() {
   const canInteractImages = activeTool === 'select';
   imageLayer.querySelectorAll('.image-item').forEach((item) => {
     item.style.pointerEvents = canInteractImages ? 'auto' : 'none';
-    item.style.cursor = canInteractImages ? 'grab' : 'default';
+    item.style.cursor = 'default';
   });
 }
 
@@ -265,6 +319,8 @@ function updateZoomUI() {
 
 function updateViewportTransform() {
   viewport.style.transform = `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`;
+  // Expose zoom so selection chrome can keep a constant on-screen size.
+  board.style.setProperty('--zoom', String(camera.zoom));
   updateToolCursorSize();
   updateZoomUI();
 }
@@ -577,6 +633,8 @@ function setTool(toolName) {
     btn.classList.toggle('is-active', btn.dataset.tool === toolName);
   });
   updateImageInteractivity();
+  updateTextInteractivity();
+  updateCompareInteractivity();
   updateToolCursorSize();
   updateCursor();
 }
@@ -606,11 +664,105 @@ function syncImageZIndices() {
   });
 }
 
-function setSelectedImage(id) {
-  selectedImageId = id;
-  imageLayer.querySelectorAll('.image-item').forEach((item) => {
-    item.classList.toggle('is-selected', item.dataset.id === id);
+// --- Unified selection (supports multi-select) -----------------------------
+function elTypeOf(el) {
+  if (!el) return null;
+  if (el.classList.contains('image-item')) return 'image';
+  if (el.classList.contains('text-item')) return 'text';
+  if (el.classList.contains('compare-item')) return 'compare';
+  return null;
+}
+
+function getElById(id) {
+  return getImageItem(id) || getTextItem(id) || getCompareItem(id);
+}
+
+function syncTextControls(id) {
+  const payload = getTextPayload(id);
+  if (!payload) return;
+  if (textSizeInput) textSizeInput.value = String(payload.size);
+  if (textSizeValue) textSizeValue.textContent = String(payload.size);
+  if (textColorPicker) textColorPicker.value = payload.color;
+  if (textColorSwatch) textColorSwatch.style.background = payload.color;
+}
+
+function refreshSelectionUI() {
+  const multi = selectedIds.size > 1;
+  const apply = (el) => {
+    const sel = selectedIds.has(el.dataset.id);
+    el.classList.toggle('is-selected', sel && !multi);
+    el.classList.toggle('is-multi', sel && multi);
+  };
+  imageLayer.querySelectorAll('.image-item').forEach(apply);
+  textLayer.querySelectorAll('.text-item').forEach(apply);
+  compareLayer.querySelectorAll('.compare-item').forEach(apply);
+
+  const ids = [...selectedIds];
+  selectedImageId = null;
+  selectedTextId = null;
+  if (ids.length === 1) {
+    const type = elTypeOf(getElById(ids[0]));
+    if (type === 'image') selectedImageId = ids[0];
+    else if (type === 'text') selectedTextId = ids[0];
+  }
+  if (selectedTextId) syncTextControls(selectedTextId);
+  updateCompareButton();
+  updateSelectionBox();
+}
+
+function clearSelection() {
+  selectedIds.clear();
+  refreshSelectionUI();
+}
+
+function selectOnly(id) {
+  selectedIds.clear();
+  if (id) selectedIds.add(id);
+  refreshSelectionUI();
+}
+
+function deselectId(id) {
+  selectedIds.delete(id);
+  refreshSelectionUI();
+}
+
+// Shift-click: add/remove a single element from the current selection.
+function toggleSelection(id) {
+  if (!id) return;
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  refreshSelectionUI();
+}
+
+// Alt-drag: duplicate the current selection in place; the copies become the
+// new selection (so the subsequent drag moves the copies, originals stay).
+function duplicateSelectionInPlace() {
+  const newIds = [];
+  [...selectedIds].forEach((id) => {
+    const type = elTypeOf(getElById(id));
+    const newId = crypto.randomUUID();
+    if (type === 'image') {
+      placeImage({ ...getImagePayload(id), id: newId }, { silent: true });
+      broadcast('image-update', getImagePayload(newId));
+    } else if (type === 'text') {
+      placeText({ ...getTextPayload(id), id: newId }, { silent: true });
+      broadcast('text-update', getTextPayload(newId));
+    } else if (type === 'compare') {
+      placeCompare({ ...getComparePayload(id), id: newId }, { silent: true });
+      broadcast('compare-update', getComparePayload(newId));
+    }
+    newIds.push(newId);
   });
+  selectedIds.clear();
+  newIds.forEach((id) => selectedIds.add(id));
+  refreshSelectionUI();
+  return newIds;
+}
+
+// Back-compat shims used across the codebase.
+function setSelectedImage(id) {
+  if (id) selectOnly(id);
+  else clearSelection();
 }
 
 function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false } = {}) {
@@ -625,12 +777,15 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
     img.draggable = false;
     img.alt = 'board-image';
 
-    const handle = document.createElement('button');
-    handle.type = 'button';
-    handle.className = 'resize-handle';
-    handle.setAttribute('aria-label', '이미지 크기 조절');
-
-    item.append(img, handle);
+    item.append(img);
+    ['nw', 'ne', 'sw', 'se'].forEach((corner) => {
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'resize-handle';
+      handle.dataset.corner = corner;
+      handle.setAttribute('aria-label', '이미지 크기 조절');
+      item.append(handle);
+    });
   }
 
   const safeWidth = clamp(width, 40, WORLD.width);
@@ -650,7 +805,6 @@ function placeImage({ id, src, x = 20, y = 20, width = 200 }, { silent = false }
   }
   updateImageInteractivity();
   syncImageZIndices();
-  setSelectedImage(id);
 
   if (!silent) {
     broadcast('image-update', getImagePayload(id));
@@ -661,9 +815,7 @@ function removeImage(id, { silent = false } = {}) {
   const item = getImageItem(id);
   if (!item) return;
   item.remove();
-  if (selectedImageId === id) {
-    setSelectedImage(null);
-  }
+  deselectId(id);
   syncImageZIndices();
   if (!silent) {
     broadcast('image-remove', { id });
@@ -684,22 +836,438 @@ function serializeImages() {
   });
 }
 
-function makeHistoryFingerprint(images) {
+// --- Text objects ----------------------------------------------------------
+function getTextItem(id) {
+  return textLayer.querySelector(`.text-item[data-id="${id}"]`);
+}
+
+function getTextBody(item) {
+  return item ? item.querySelector('.text-body') : null;
+}
+
+function getTextPayload(id) {
+  const item = getTextItem(id);
+  if (!item) return null;
+  const body = getTextBody(item);
+  return {
+    id,
+    x: Number(item.dataset.x || 0),
+    y: Number(item.dataset.y || 0),
+    text: body ? body.textContent || '' : '',
+    color: item.dataset.color || '#111827',
+    size: Number(item.dataset.size || DEFAULT_TEXT_SIZE),
+    width: item.dataset.width ? Number(item.dataset.width) : null,
+    minHeight: item.dataset.minHeight ? Number(item.dataset.minHeight) : null,
+  };
+}
+
+function placeCaretEnd(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel = window.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+let textSyncTimer = null;
+function broadcastTextUpdateThrottled(id) {
+  if (textSyncTimer) return;
+  const payload = getTextPayload(id);
+  if (payload) broadcast('text-update', payload);
+  textSyncTimer = setTimeout(() => {
+    textSyncTimer = null;
+  }, 80);
+}
+
+function attachTextItemHandlers(item) {
+  const body = item.querySelector('.text-body');
+  body.addEventListener('input', () => {
+    const id = item.dataset.id;
+    if (id) broadcastTextUpdateThrottled(id);
+  });
+  body.addEventListener('blur', () => finishTextEdit(item));
+  body.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      body.blur();
+    }
+    // Keep typing local: don't let board shortcuts fire while editing.
+    event.stopPropagation();
+  });
+  item.addEventListener('dblclick', (event) => {
+    event.stopPropagation();
+    beginTextEdit(item.dataset.id);
+  });
+}
+
+function placeText(
+  {
+    id,
+    x = 20,
+    y = 20,
+    text = '',
+    color = '#111827',
+    size = DEFAULT_TEXT_SIZE,
+    width = null,
+    minHeight = null,
+  },
+  { silent = false } = {},
+) {
+  let item = getTextItem(id);
+  const isNew = !item;
+  if (!item) {
+    item = document.createElement('div');
+    item.className = 'text-item';
+    item.dataset.id = id;
+
+    const body = document.createElement('div');
+    body.className = 'text-body';
+    item.appendChild(body);
+
+    ['nw', 'ne', 'sw', 'se'].forEach((corner) => {
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'resize-handle';
+      handle.dataset.corner = corner;
+      handle.contentEditable = 'false';
+      handle.setAttribute('aria-label', '텍스트 박스 크기 조절');
+      item.appendChild(handle);
+    });
+
+    attachTextItemHandlers(item);
+  }
+
+  const safeX = clamp(x, -WORLD.width, WORLD.width);
+  const safeY = clamp(y, -WORLD.height, WORLD.height);
+  item.dataset.x = String(safeX);
+  item.dataset.y = String(safeY);
+  item.dataset.color = color;
+  item.dataset.size = String(size);
+  item.style.left = `${safeX}px`;
+  item.style.top = `${safeY}px`;
+  item.style.color = color;
+  item.style.fontSize = `${size}px`;
+
+  // Fixed-width text box (drawn with the text tool) vs. auto-width.
+  if (width != null) {
+    item.dataset.width = String(width);
+    item.style.width = `${width}px`;
+  } else {
+    delete item.dataset.width;
+    item.style.width = '';
+  }
+  if (minHeight != null) {
+    item.dataset.minHeight = String(minHeight);
+    item.style.minHeight = `${minHeight}px`;
+  } else {
+    delete item.dataset.minHeight;
+    item.style.minHeight = '';
+  }
+
+  // Don't clobber the caret while this client is editing the same node.
+  const body = getTextBody(item);
+  if (body && textEditingId !== id && body.textContent !== text) {
+    body.textContent = text;
+  }
+
+  if (isNew) textLayer.appendChild(item);
+  updateTextInteractivity();
+
+  if (!silent) broadcast('text-update', getTextPayload(id));
+  return item;
+}
+
+function setSelectedText(id) {
+  if (id) selectOnly(id);
+  else clearSelection();
+}
+
+function beginTextEdit(id) {
+  const item = getTextItem(id);
+  if (!item) return;
+  const body = getTextBody(item);
+  if (!body) return;
+  setSelectedText(id);
+  textEditingId = id;
+  item.classList.add('is-editing');
+  body.contentEditable = 'true';
+  item.style.pointerEvents = 'auto';
+  body.focus();
+  placeCaretEnd(body);
+}
+
+function finishTextEdit(item) {
+  if (!item) return;
+  const id = item.dataset.id;
+  const body = getTextBody(item);
+  if (body) body.contentEditable = 'false';
+  item.classList.remove('is-editing');
+  if (textEditingId === id) textEditingId = null;
+
+  const text = ((body && body.textContent) || '').trim();
+  if (!text) {
+    // Empty text box -> discard it.
+    removeText(id);
+    pushHistory('text-remove-empty');
+    return;
+  }
+  if (body && body.textContent !== text) body.textContent = text;
+  broadcast('text-update', getTextPayload(id));
+  pushHistory('text-edit');
+  updateTextInteractivity();
+}
+
+function removeText(id, { silent = false } = {}) {
+  const item = getTextItem(id);
+  if (!item) return;
+  item.remove();
+  if (textEditingId === id) textEditingId = null;
+  deselectId(id);
+  if (!silent) broadcast('text-remove', { id });
+}
+
+function serializeTexts() {
+  return [...textLayer.querySelectorAll('.text-item')].map((item) => {
+    const body = getTextBody(item);
+    return {
+      id: item.dataset.id,
+      x: Number(item.dataset.x || 0),
+      y: Number(item.dataset.y || 0),
+      text: body ? body.textContent || '' : '',
+      color: item.dataset.color || '#111827',
+      size: Number(item.dataset.size || DEFAULT_TEXT_SIZE),
+      width: item.dataset.width ? Number(item.dataset.width) : null,
+      minHeight: item.dataset.minHeight ? Number(item.dataset.minHeight) : null,
+    };
+  });
+}
+
+function updateTextInteractivity() {
+  const interactive = activeTool === 'select' || activeTool === 'text';
+  textLayer.querySelectorAll('.text-item').forEach((item) => {
+    const editing = item.classList.contains('is-editing');
+    item.style.pointerEvents = interactive || editing ? 'auto' : 'none';
+    if (!editing) {
+      item.style.cursor = activeTool === 'text' ? 'text' : 'default';
+    }
+  });
+}
+
+// --- Image compare (before/after wipe) -------------------------------------
+function getCompareItem(id) {
+  return compareLayer.querySelector(`.compare-item[data-id="${id}"]`);
+}
+
+function getComparePayload(id) {
+  const item = getCompareItem(id);
+  if (!item) return null;
+  return {
+    id,
+    type: 'compare',
+    x: Number(item.dataset.x || 0),
+    y: Number(item.dataset.y || 0),
+    width: Number(item.dataset.width || 200),
+    height: Number(item.dataset.height || 150),
+    srcA: item.dataset.srca || '',
+    srcB: item.dataset.srcb || '',
+    split: Number(item.dataset.split || 0.5),
+    orientation: item.dataset.orientation || 'v',
+  };
+}
+
+function applyCompareLayout(item) {
+  const W = Number(item.dataset.width || 200);
+  const H = Number(item.dataset.height || 150);
+  const split = clamp(Number(item.dataset.split || 0.5), 0, 1);
+  item.style.width = `${W}px`;
+  item.style.height = `${H}px`;
+  const top = item.querySelector('.compare-top');
+  const clip = item.querySelector('.compare-clip');
+  const divider = item.querySelector('.compare-divider');
+  if (top) {
+    top.style.width = `${W}px`;
+    top.style.height = `${H}px`;
+  }
+  if (clip) clip.style.width = `${split * W}px`;
+  if (divider) divider.style.left = `${split * W}px`;
+}
+
+function placeCompare(payload, { silent = false } = {}) {
+  const { id } = payload;
+  let item = getCompareItem(id);
+  const isNew = !item;
+  if (!item) {
+    item = document.createElement('div');
+    item.className = 'compare-item';
+    item.dataset.id = id;
+
+    const base = document.createElement('img');
+    base.className = 'compare-base';
+    base.draggable = false;
+    base.alt = 'compare-b';
+
+    const clip = document.createElement('div');
+    clip.className = 'compare-clip';
+    const top = document.createElement('img');
+    top.className = 'compare-top';
+    top.draggable = false;
+    top.alt = 'compare-a';
+    clip.appendChild(top);
+
+    const divider = document.createElement('div');
+    divider.className = 'compare-divider';
+    const handle = document.createElement('div');
+    handle.className = 'compare-handle';
+    handle.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8l-3 4 3 4"/><path d="M13 8l3 4-3 4"/></svg>';
+    divider.appendChild(handle);
+
+    const frame = document.createElement('div');
+    frame.className = 'compare-frame';
+    frame.append(base, clip, divider);
+    item.appendChild(frame);
+
+    ['nw', 'ne', 'sw', 'se'].forEach((corner) => {
+      const h = document.createElement('button');
+      h.type = 'button';
+      h.className = 'resize-handle';
+      h.dataset.corner = corner;
+      h.setAttribute('aria-label', '비교 박스 크기 조절');
+      item.appendChild(h);
+    });
+  }
+
+  const W = clamp(Number(payload.width || 200), 40, WORLD.width);
+  const H = clamp(Number(payload.height || 150), 40, WORLD.height);
+  const safeX = clamp(Number(payload.x || 0), -WORLD.width, WORLD.width);
+  const safeY = clamp(Number(payload.y || 0), -WORLD.height, WORLD.height);
+  item.dataset.x = String(safeX);
+  item.dataset.y = String(safeY);
+  item.dataset.width = String(W);
+  item.dataset.height = String(H);
+  item.dataset.split = String(clamp(Number(payload.split ?? 0.5), 0, 1));
+  item.dataset.orientation = payload.orientation || 'v';
+  item.dataset.srca = payload.srcA || '';
+  item.dataset.srcb = payload.srcB || '';
+  item.style.left = `${safeX}px`;
+  item.style.top = `${safeY}px`;
+
+  const base = item.querySelector('.compare-base');
+  const top = item.querySelector('.compare-top');
+  if (base && payload.srcB && base.src !== payload.srcB) base.src = payload.srcB;
+  if (top && payload.srcA && top.src !== payload.srcA) top.src = payload.srcA;
+
+  applyCompareLayout(item);
+
+  if (isNew) compareLayer.appendChild(item);
+  updateCompareInteractivity();
+
+  if (!silent) broadcast('compare-update', getComparePayload(id));
+  return item;
+}
+
+function removeCompare(id, { silent = false } = {}) {
+  const item = getCompareItem(id);
+  if (!item) return;
+  item.remove();
+  deselectId(id);
+  if (!silent) broadcast('compare-remove', { id });
+}
+
+function serializeCompares() {
+  return [...compareLayer.querySelectorAll('.compare-item')].map((item) => ({
+    id: item.dataset.id,
+    type: 'compare',
+    x: Number(item.dataset.x || 0),
+    y: Number(item.dataset.y || 0),
+    width: Number(item.dataset.width || 200),
+    height: Number(item.dataset.height || 150),
+    srcA: item.dataset.srca || '',
+    srcB: item.dataset.srcb || '',
+    split: Number(item.dataset.split || 0.5),
+    orientation: item.dataset.orientation || 'v',
+  }));
+}
+
+function updateCompareInteractivity() {
+  const interactive = activeTool === 'select';
+  compareLayer.querySelectorAll('.compare-item').forEach((item) => {
+    item.style.pointerEvents = interactive ? 'auto' : 'none';
+    item.style.cursor = 'default';
+  });
+}
+
+let compareSyncTimer = null;
+function broadcastCompareThrottled(id) {
+  if (compareSyncTimer) return;
+  const payload = getComparePayload(id);
+  if (payload) broadcast('compare-update', payload);
+  compareSyncTimer = setTimeout(() => {
+    compareSyncTimer = null;
+  }, 70);
+}
+
+function updateCompareButton() {
+  if (!makeCompareBtn) return;
+  const imageCount = [...selectedIds].filter((id) => getImageItem(id)).length;
+  makeCompareBtn.disabled = !(selectedIds.size === 2 && imageCount === 2);
+}
+
+function createCompareFromSelection() {
+  const imgs = [...selectedIds].map((id) => getImageItem(id)).filter(Boolean);
+  if (imgs.length !== 2) return;
+  // Lower layer (smaller z) becomes A (left side).
+  imgs.sort((a, b) => Number(a.dataset.z || 0) - Number(b.dataset.z || 0));
+  const [a, b] = imgs;
+  const aImg = a.querySelector('img');
+  const bImg = b.querySelector('img');
+  const srcA = aImg ? aImg.src : '';
+  const srcB = bImg ? bImg.src : '';
+  const x = Number(a.dataset.x || 0);
+  const y = Number(a.dataset.y || 0);
+  const width = Number(a.dataset.width || 220);
+  const aspect =
+    aImg && aImg.naturalWidth && aImg.naturalHeight
+      ? aImg.naturalWidth / aImg.naturalHeight
+      : a.offsetWidth / Math.max(1, a.offsetHeight);
+  const height = width / (aspect || 1.5);
+  const id = crypto.randomUUID();
+
+  // Keep the original images; place the compare box beside them (to the right).
+  const newX = x + width + 24;
+  placeCompare({ id, x: newX, y, width, height, srcA, srcB, split: 0.5, orientation: 'v' });
+  selectOnly(id);
+  pushHistory('create-compare');
+}
+
+function makeHistoryFingerprint(images, texts = [], compares = []) {
   const imageSignature = images
     .map((image) => `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}`)
     .join('|');
-  return `${drawingOps.length}::${imageSignature}`;
+  const textSignature = texts
+    .map((t) => `${t.id}:${t.x}:${t.y}:${t.size}:${t.color}:${t.width}:${t.text}`)
+    .join('|');
+  const compareSignature = compares
+    .map((c) => `${c.id}:${c.x}:${c.y}:${c.width}:${c.height}:${c.split}:${c.orientation}`)
+    .join('|');
+  return `${drawingOps.length}::${imageSignature}::${textSignature}::${compareSignature}`;
 }
 
 function snapshotBoardState() {
   const images = serializeImages();
+  const texts = serializeTexts();
+  const compares = serializeCompares();
   return {
     drawingOps: drawingOps.map((stroke) => ({
       ...stroke,
       points: stroke.points.map((point) => ({ ...point })),
     })),
     images,
-    fingerprint: makeHistoryFingerprint(images),
+    texts,
+    compares,
+    fingerprint: makeHistoryFingerprint(images, texts, compares),
   };
 }
 
@@ -714,8 +1282,18 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
 
   imageLayer.innerHTML = '';
   state.images.forEach((payload) => placeImage(payload, { silent: true }));
+
+  textLayer.innerHTML = '';
+  (state.texts || []).forEach((payload) => placeText(payload, { silent: true }));
+
+  compareLayer.innerHTML = '';
+  (state.compares || []).forEach((payload) => placeCompare(payload, { silent: true }));
+
   setSelectedImage(null);
-  historyFingerprint = state.fingerprint || makeHistoryFingerprint(state.images || []);
+  setSelectedText(null);
+  historyFingerprint =
+    state.fingerprint ||
+    makeHistoryFingerprint(state.images || [], state.texts || [], state.compares || []);
   isRestoringHistory = false;
 
   if (broadcastRestore) {
@@ -738,8 +1316,11 @@ function pushHistory(reason = '') {
   historyIndex = history.length - 1;
   historyFingerprint = snapshot.fingerprint;
 
-  if (reason) {
-    // no-op hook for debugging
+  // Persist the new state to the server so late joiners receive it.
+  // Skip the startup 'initial' push so an empty board never clobbers
+  // content that another client has already stored on the server.
+  if (reason !== 'initial') {
+    scheduleStateSync();
   }
 }
 
@@ -759,6 +1340,351 @@ function isPanTrigger(event) {
   return event.button === 1 || (event.button === 0 && isSpacePressed);
 }
 
+// --- Transient overlays (text draft + marquee) -----------------------------
+let textDraftEl = null;
+function updateTextDraft(x, y, w, h) {
+  if (!textDraftEl) {
+    textDraftEl = document.createElement('div');
+    textDraftEl.className = 'text-draft';
+    viewport.appendChild(textDraftEl);
+  }
+  textDraftEl.style.left = `${x}px`;
+  textDraftEl.style.top = `${y}px`;
+  textDraftEl.style.width = `${w}px`;
+  textDraftEl.style.height = `${h}px`;
+  textDraftEl.style.display = 'block';
+}
+function hideTextDraft() {
+  if (textDraftEl) {
+    textDraftEl.remove();
+    textDraftEl = null;
+  }
+}
+
+let marqueeEl = null;
+function updateMarquee(x, y, w, h) {
+  if (!marqueeEl) {
+    marqueeEl = document.createElement('div');
+    marqueeEl.className = 'marquee';
+    viewport.appendChild(marqueeEl);
+  }
+  marqueeEl.style.left = `${x}px`;
+  marqueeEl.style.top = `${y}px`;
+  marqueeEl.style.width = `${w}px`;
+  marqueeEl.style.height = `${h}px`;
+  marqueeEl.style.display = 'block';
+}
+function hideMarquee() {
+  if (marqueeEl) {
+    marqueeEl.remove();
+    marqueeEl = null;
+  }
+}
+
+// --- Smart snap (alignment to other elements' edges/centers) ----------------
+const SNAP_PX = 6;
+let snapGuideV = null;
+let snapGuideH = null;
+
+function collectSnapTargets(excludeIds) {
+  const boxes = [];
+  const add = (el) => {
+    if (excludeIds.has(el.dataset.id)) return;
+    boxes.push({
+      x: Number(el.dataset.x || 0),
+      y: Number(el.dataset.y || 0),
+      w: el.offsetWidth,
+      h: el.offsetHeight,
+    });
+  };
+  imageLayer.querySelectorAll('.image-item').forEach(add);
+  textLayer.querySelectorAll('.text-item').forEach(add);
+  compareLayer.querySelectorAll('.compare-item').forEach(add);
+  return boxes;
+}
+
+function computeSnap(box, targets) {
+  const th = SNAP_PX / camera.zoom;
+  const movX = [box.x, box.x + box.w / 2, box.x + box.w];
+  const movY = [box.y, box.y + box.h / 2, box.y + box.h];
+  let bestDx = null;
+  let guideX = null;
+  let bestDy = null;
+  let guideY = null;
+  targets.forEach((t) => {
+    const tX = [t.x, t.x + t.w / 2, t.x + t.w];
+    const tY = [t.y, t.y + t.h / 2, t.y + t.h];
+    movX.forEach((mx) => {
+      tX.forEach((tx) => {
+        const d = tx - mx;
+        if (Math.abs(d) <= th && (bestDx === null || Math.abs(d) < Math.abs(bestDx))) {
+          bestDx = d;
+          guideX = tx;
+        }
+      });
+    });
+    movY.forEach((my) => {
+      tY.forEach((ty) => {
+        const d = ty - my;
+        if (Math.abs(d) <= th && (bestDy === null || Math.abs(d) < Math.abs(bestDy))) {
+          bestDy = d;
+          guideY = ty;
+        }
+      });
+    });
+  });
+  return { dx: bestDx || 0, dy: bestDy || 0, guideX, guideY };
+}
+
+// 1-D snap for a single moving edge (used while resizing).
+function snapValue(v, lines, th) {
+  let best = null;
+  let guide = null;
+  lines.forEach((l) => {
+    const d = l - v;
+    if (Math.abs(d) <= th && (best === null || Math.abs(d) < Math.abs(best))) {
+      best = d;
+      guide = l;
+    }
+  });
+  return { snapped: best === null ? v : v + best, guide };
+}
+
+function snapLinesX(excludeIds) {
+  const xs = [];
+  collectSnapTargets(excludeIds).forEach((t) => {
+    xs.push(t.x, t.x + t.w / 2, t.x + t.w);
+  });
+  return xs;
+}
+
+function snapLinesY(excludeIds) {
+  const ys = [];
+  collectSnapTargets(excludeIds).forEach((t) => {
+    ys.push(t.y, t.y + t.h / 2, t.y + t.h);
+  });
+  return ys;
+}
+
+// Aspect-locked resize snap: consider both the moving X edge and Y edge,
+// snap to whichever is closest, and return the resulting width.
+function snapAspectResize(world, interaction, aspect, excludeIds) {
+  const th = SNAP_PX / camera.zoom;
+  const isTop = interaction.corner === 'nw' || interaction.corner === 'ne';
+  const w0 = Math.abs(world.x - interaction.fixedX); // raw width from cursor X
+  const sx = snapValue(world.x, snapLinesX(excludeIds), th);
+  const movingY = isTop
+    ? interaction.fixedY - w0 / aspect
+    : interaction.fixedY + w0 / aspect;
+  const sy = snapValue(movingY, snapLinesY(excludeIds), th);
+
+  const candidates = [];
+  if (sx.guide != null) {
+    const w = Math.abs(sx.snapped - interaction.fixedX);
+    candidates.push({ width: w, guideX: sx.guide, guideY: null, d: Math.abs(w - w0) });
+  }
+  if (sy.guide != null) {
+    const w = Math.abs(sy.snapped - interaction.fixedY) * aspect;
+    candidates.push({ width: w, guideX: null, guideY: sy.guide, d: Math.abs(w - w0) });
+  }
+  if (candidates.length) {
+    candidates.sort((a, b) => a.d - b.d);
+    return candidates[0];
+  }
+  return { width: w0, guideX: null, guideY: null };
+}
+
+function showSnapGuides(guideX, guideY) {
+  if (guideX != null) {
+    if (!snapGuideV) {
+      snapGuideV = document.createElement('div');
+      snapGuideV.className = 'snap-guide snap-guide-v';
+      snapGuideV.style.height = `${WORLD.height}px`;
+      viewport.appendChild(snapGuideV);
+    }
+    snapGuideV.style.left = `${guideX}px`;
+    snapGuideV.style.display = 'block';
+  } else if (snapGuideV) {
+    snapGuideV.style.display = 'none';
+  }
+
+  if (guideY != null) {
+    if (!snapGuideH) {
+      snapGuideH = document.createElement('div');
+      snapGuideH.className = 'snap-guide snap-guide-h';
+      snapGuideH.style.width = `${WORLD.width}px`;
+      viewport.appendChild(snapGuideH);
+    }
+    snapGuideH.style.top = `${guideY}px`;
+    snapGuideH.style.display = 'block';
+  } else if (snapGuideH) {
+    snapGuideH.style.display = 'none';
+  }
+}
+
+function hideSnapGuides() {
+  if (snapGuideV) snapGuideV.style.display = 'none';
+  if (snapGuideH) snapGuideH.style.display = 'none';
+}
+
+// Snap a moving box against other elements; returns adjusted {x, y}.
+function applySnap(excludeIds, nx, ny, w, h) {
+  const snap = computeSnap({ x: nx, y: ny, w, h }, collectSnapTargets(excludeIds));
+  showSnapGuides(snap.guideX, snap.guideY);
+  return { x: nx + snap.dx, y: ny + snap.dy };
+}
+
+function beginGroupMove(event) {
+  const world = eventToWorld(event);
+  const items = [...selectedIds]
+    .map((id) => {
+      const el = getElById(id);
+      if (!el) return null;
+      return {
+        id,
+        type: elTypeOf(el),
+        startX: Number(el.dataset.x || 0),
+        startY: Number(el.dataset.y || 0),
+      };
+    })
+    .filter(Boolean);
+  interaction = {
+    mode: 'move-group',
+    pointerId: event.pointerId,
+    startWorldX: world.x,
+    startWorldY: world.y,
+    items,
+    bbox: getSelectionBounds(),
+  };
+  board.setPointerCapture(event.pointerId);
+}
+
+// --- Group bounding box (multi-selection) ----------------------------------
+function getSelectionBounds() {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  [...selectedIds].forEach((id) => {
+    const el = getElById(id);
+    if (!el) return;
+    const x = Number(el.dataset.x || 0);
+    const y = Number(el.dataset.y || 0);
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    if (x < x0) x0 = x;
+    if (y < y0) y0 = y;
+    if (x + w > x1) x1 = x + w;
+    if (y + h > y1) y1 = y + h;
+  });
+  if (x0 === Infinity) return null;
+  return { x0, y0, x1, y1 };
+}
+
+let selectionBoxEl = null;
+function updateSelectionBox() {
+  if (!selectionBoxEl) {
+    selectionBoxEl = document.createElement('div');
+    selectionBoxEl.className = 'selection-box';
+    ['nw', 'ne', 'sw', 'se'].forEach((corner) => {
+      const h = document.createElement('div');
+      h.className = 'sel-handle';
+      h.dataset.corner = corner;
+      selectionBoxEl.appendChild(h);
+    });
+    viewport.appendChild(selectionBoxEl);
+  }
+  const bounds = selectedIds.size > 1 ? getSelectionBounds() : null;
+  if (bounds) {
+    selectionBoxEl.style.left = `${bounds.x0}px`;
+    selectionBoxEl.style.top = `${bounds.y0}px`;
+    selectionBoxEl.style.width = `${bounds.x1 - bounds.x0}px`;
+    selectionBoxEl.style.height = `${bounds.y1 - bounds.y0}px`;
+    selectionBoxEl.style.display = 'block';
+  } else {
+    selectionBoxEl.style.display = 'none';
+  }
+}
+
+function beginGroupResize(event, corner) {
+  const bounds = getSelectionBounds();
+  if (!bounds) return;
+  const W = Math.max(1, bounds.x1 - bounds.x0);
+  const H = Math.max(1, bounds.y1 - bounds.y0);
+  const fixedX = corner === 'nw' || corner === 'sw' ? bounds.x1 : bounds.x0;
+  const fixedY = corner === 'nw' || corner === 'ne' ? bounds.y1 : bounds.y0;
+  const items = [...selectedIds]
+    .map((id) => {
+      const el = getElById(id);
+      if (!el) return null;
+      const type = elTypeOf(el);
+      const base = { id, type, x: Number(el.dataset.x || 0), y: Number(el.dataset.y || 0) };
+      if (type === 'image') {
+        base.width = Number(el.dataset.width || 200);
+      } else if (type === 'text') {
+        base.width = el.dataset.width ? Number(el.dataset.width) : el.offsetWidth;
+        base.size = Number(el.dataset.size || DEFAULT_TEXT_SIZE);
+        base.minHeight = el.dataset.minHeight ? Number(el.dataset.minHeight) : el.offsetHeight;
+      } else if (type === 'compare') {
+        base.width = Number(el.dataset.width || 200);
+        base.height = Number(el.dataset.height || 150);
+      }
+      return base;
+    })
+    .filter(Boolean);
+  interaction = { mode: 'resize-group', pointerId: event.pointerId, corner, fixedX, fixedY, W, H, items };
+  board.setPointerCapture(event.pointerId);
+}
+
+function finishCreateText(event) {
+  hideTextDraft();
+  const world = eventToWorld(event);
+  const x = Math.min(interaction.startX, world.x);
+  const y = Math.min(interaction.startY, world.y);
+  let width = Math.abs(world.x - interaction.startX);
+  const height = Math.abs(world.y - interaction.startY);
+  if (width < 6) width = 240; // plain click -> default box width
+  width = clamp(width, 40, WORLD.width);
+  const minHeight = Math.max(Math.round(textSize * 1.4), Math.round(height));
+  const id = crypto.randomUUID();
+  placeText(
+    { id, x, y, text: '', color: textColor, size: textSize, width, minHeight },
+    { silent: true },
+  );
+  beginTextEdit(id);
+}
+
+function finishMarquee(event) {
+  hideMarquee();
+  const world = eventToWorld(event);
+  const x0 = Math.min(interaction.startX, world.x);
+  const y0 = Math.min(interaction.startY, world.y);
+  const x1 = Math.max(interaction.startX, world.x);
+  const y1 = Math.max(interaction.startY, world.y);
+  const dragged = x1 - x0 > 3 || y1 - y0 > 3;
+  if (!dragged) {
+    // Plain click on empty space clears; Shift-click keeps current selection.
+    if (!interaction.additive) clearSelection();
+    return;
+  }
+  const hits = [];
+  const test = (el) => {
+    const ex = Number(el.dataset.x || 0);
+    const ey = Number(el.dataset.y || 0);
+    const ew = el.offsetWidth;
+    const eh = el.offsetHeight;
+    if (ex < x1 && ex + ew > x0 && ey < y1 && ey + eh > y0) hits.push(el.dataset.id);
+  };
+  imageLayer.querySelectorAll('.image-item').forEach(test);
+  textLayer.querySelectorAll('.text-item').forEach(test);
+  compareLayer.querySelectorAll('.compare-item').forEach(test);
+
+  selectedIds.clear();
+  if (interaction.additive) interaction.baseIds.forEach((id) => selectedIds.add(id));
+  hits.forEach((id) => selectedIds.add(id));
+  refreshSelectionUI();
+}
+
 function pointerDown(event) {
   if (isPanTrigger(event)) {
     event.preventDefault();
@@ -774,36 +1700,260 @@ function pointerDown(event) {
     return;
   }
 
+  // While editing a text box with the text tool, clicking outside it should
+  // just commit the text (not spawn a new box).
+  if (activeTool === 'text' && textEditingId) {
+    const editingItem = getTextItem(textEditingId);
+    if (editingItem && !editingItem.contains(event.target)) {
+      event.preventDefault();
+      const body = editingItem.querySelector('.text-body');
+      if (body) body.blur();
+      return;
+    }
+  }
+
+  // Group bounding-box resize handle (multi-selection).
+  const selHandle = event.target.closest('.sel-handle');
+  if (selHandle && activeTool === 'select' && selectedIds.size > 1) {
+    event.preventDefault();
+    beginGroupResize(event, selHandle.dataset.corner);
+    return;
+  }
+
   const item = event.target.closest('.image-item');
   if (item && activeTool === 'select') {
     event.preventDefault();
     const id = item.dataset.id;
-    setSelectedImage(id);
-
+    if (event.shiftKey) {
+      toggleSelection(id);
+      return;
+    }
+    const handle = event.target.closest('.resize-handle');
     const world = eventToWorld(event);
     const x = Number(item.dataset.x || 0);
     const y = Number(item.dataset.y || 0);
     const width = Number(item.dataset.width || 200);
-    const isResize = event.target.classList.contains('resize-handle');
 
+    if (handle) {
+      selectOnly(id);
+      const img = item.querySelector('img');
+      const aspect =
+        img && img.naturalWidth && img.naturalHeight
+          ? img.naturalWidth / img.naturalHeight
+          : item.offsetWidth / Math.max(1, item.offsetHeight);
+      const height = width / aspect;
+      const corner = handle.dataset.corner || 'se';
+      // Anchor = the corner opposite the one being dragged.
+      const fixedX = corner === 'nw' || corner === 'sw' ? x + width : x;
+      const fixedY = corner === 'nw' || corner === 'ne' ? y + height : y;
+      interaction = {
+        mode: 'resize-image',
+        id,
+        pointerId: event.pointerId,
+        corner,
+        fixedX,
+        fixedY,
+        aspect,
+      };
+      item.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    // Alt-drag duplicates, then drags the copies (originals stay put).
+    if (event.altKey) {
+      if (!selectedIds.has(id)) selectOnly(id);
+      duplicateSelectionInPlace();
+      beginGroupMove(event);
+      return;
+    }
+
+    // Dragging an already multi-selected item moves the whole group.
+    if (selectedIds.has(id) && selectedIds.size > 1) {
+      beginGroupMove(event);
+      return;
+    }
+
+    selectOnly(id);
     interaction = {
-      mode: isResize ? 'resize-image' : 'move-image',
+      mode: 'move-image',
       id,
       pointerId: event.pointerId,
       offsetX: world.x - x,
       offsetY: world.y - y,
-      startX: world.x,
-      startY: world.y,
-      startWidth: width,
     };
     item.setPointerCapture(event.pointerId);
     return;
   }
 
-  setSelectedImage(null);
+  const cmpEl = event.target.closest('.compare-item');
+  if (cmpEl && activeTool === 'select') {
+    event.preventDefault();
+    const id = cmpEl.dataset.id;
+    if (event.shiftKey) {
+      toggleSelection(id);
+      return;
+    }
+    const handle = event.target.closest('.resize-handle');
+    const onDivider = event.target.closest('.compare-divider');
 
-  if (event.button !== 0) return;
-  if (activeTool === 'select') return;
+    if (handle) {
+      selectOnly(id);
+      const x = Number(cmpEl.dataset.x || 0);
+      const y = Number(cmpEl.dataset.y || 0);
+      const width = Number(cmpEl.dataset.width || 200);
+      const height = Number(cmpEl.dataset.height || 150);
+      const corner = handle.dataset.corner || 'se';
+      const fixedX = corner === 'nw' || corner === 'sw' ? x + width : x;
+      const fixedY = corner === 'nw' || corner === 'ne' ? y + height : y;
+      interaction = {
+        mode: 'resize-compare',
+        id,
+        pointerId: event.pointerId,
+        corner,
+        fixedX,
+        fixedY,
+        aspect: width / Math.max(1, height),
+      };
+      cmpEl.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (onDivider) {
+      selectOnly(id);
+      interaction = { mode: 'wipe', id, pointerId: event.pointerId };
+      cmpEl.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (event.altKey) {
+      if (!selectedIds.has(id)) selectOnly(id);
+      duplicateSelectionInPlace();
+      beginGroupMove(event);
+      return;
+    }
+
+    if (selectedIds.has(id) && selectedIds.size > 1) {
+      beginGroupMove(event);
+      return;
+    }
+
+    selectOnly(id);
+    const world = eventToWorld(event);
+    interaction = {
+      mode: 'move-compare',
+      id,
+      pointerId: event.pointerId,
+      offsetX: world.x - Number(cmpEl.dataset.x || 0),
+      offsetY: world.y - Number(cmpEl.dataset.y || 0),
+    };
+    cmpEl.setPointerCapture(event.pointerId);
+    return;
+  }
+
+  const textEl = event.target.closest('.text-item');
+  if (textEl && (activeTool === 'select' || activeTool === 'text')) {
+    const id = textEl.dataset.id;
+    if (activeTool === 'select' && event.shiftKey) {
+      event.preventDefault();
+      toggleSelection(id);
+      return;
+    }
+    const textHandle = event.target.closest('.resize-handle');
+
+    // Resize the text box by dragging a corner handle (select mode).
+    if (activeTool === 'select' && textHandle) {
+      event.preventDefault();
+      selectOnly(id);
+      const x = Number(textEl.dataset.x || 0);
+      const y = Number(textEl.dataset.y || 0);
+      const width = textEl.dataset.width ? Number(textEl.dataset.width) : textEl.offsetWidth;
+      const height = textEl.dataset.minHeight
+        ? Number(textEl.dataset.minHeight)
+        : textEl.offsetHeight;
+      const corner = textHandle.dataset.corner || 'se';
+      const fixedX = corner === 'nw' || corner === 'sw' ? x + width : x;
+      const fixedY = corner === 'nw' || corner === 'ne' ? y + height : y;
+      interaction = {
+        mode: 'resize-text',
+        id,
+        pointerId: event.pointerId,
+        corner,
+        fixedX,
+        fixedY,
+      };
+      textEl.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (activeTool === 'text') {
+      if (textEditingId === id) return; // already editing -> allow native caret placement
+      event.preventDefault();
+      beginTextEdit(id);
+      return;
+    }
+    // select mode: select the text and prepare to drag it
+    event.preventDefault();
+    if (event.altKey) {
+      if (!selectedIds.has(id)) selectOnly(id);
+      duplicateSelectionInPlace();
+      beginGroupMove(event);
+      return;
+    }
+    if (selectedIds.has(id) && selectedIds.size > 1) {
+      beginGroupMove(event);
+      return;
+    }
+    selectOnly(id);
+    const world = eventToWorld(event);
+    interaction = {
+      mode: 'move-text',
+      id,
+      pointerId: event.pointerId,
+      offsetX: world.x - Number(textEl.dataset.x || 0),
+      offsetY: world.y - Number(textEl.dataset.y || 0),
+    };
+    textEl.setPointerCapture(event.pointerId);
+    return;
+  }
+
+  if (event.button !== 0) {
+    clearSelection();
+    return;
+  }
+
+  if (activeTool === 'select') {
+    // Drag an empty area to marquee-select multiple objects.
+    event.preventDefault();
+    const world = eventToWorld(event);
+    interaction = {
+      mode: 'marquee',
+      pointerId: event.pointerId,
+      startX: world.x,
+      startY: world.y,
+      additive: event.shiftKey,
+      baseIds: event.shiftKey ? [...selectedIds] : [],
+    };
+    board.setPointerCapture(event.pointerId);
+    updateMarquee(world.x, world.y, 0, 0);
+    return;
+  }
+
+  clearSelection();
+
+  if (activeTool === 'text') {
+    // Drag to draw a fixed-width text box (Figma-style); a plain click makes a default box.
+    event.preventDefault();
+    const world = eventToWorld(event);
+    interaction = {
+      mode: 'create-text',
+      pointerId: event.pointerId,
+      startX: world.x,
+      startY: world.y,
+    };
+    board.setPointerCapture(event.pointerId);
+    return;
+  }
+
   if (activeTool === 'eraser') {
     isDrawing = true;
     lastPoint = eventToWorld(event);
@@ -850,17 +2000,207 @@ function pointerMove(event) {
 
   if (interaction && event.pointerId === interaction.pointerId) {
     const world = eventToWorld(event);
+
+    if (interaction.mode === 'marquee') {
+      updateMarquee(
+        Math.min(interaction.startX, world.x),
+        Math.min(interaction.startY, world.y),
+        Math.abs(world.x - interaction.startX),
+        Math.abs(world.y - interaction.startY),
+      );
+      return;
+    }
+
+    if (interaction.mode === 'create-text') {
+      updateTextDraft(
+        Math.min(interaction.startX, world.x),
+        Math.min(interaction.startY, world.y),
+        Math.abs(world.x - interaction.startX),
+        Math.abs(world.y - interaction.startY),
+      );
+      return;
+    }
+
+    if (interaction.mode === 'move-group') {
+      const dx = world.x - interaction.startWorldX;
+      const dy = world.y - interaction.startWorldY;
+      let sdx = 0;
+      let sdy = 0;
+      if (interaction.bbox) {
+        const excl = new Set(interaction.items.map((i) => i.id));
+        const snap = computeSnap(
+          {
+            x: interaction.bbox.x0 + dx,
+            y: interaction.bbox.y0 + dy,
+            w: interaction.bbox.x1 - interaction.bbox.x0,
+            h: interaction.bbox.y1 - interaction.bbox.y0,
+          },
+          collectSnapTargets(excl),
+        );
+        sdx = snap.dx;
+        sdy = snap.dy;
+        showSnapGuides(snap.guideX, snap.guideY);
+      }
+      interaction.items.forEach((it) => {
+        const nx = it.startX + dx + sdx;
+        const ny = it.startY + dy + sdy;
+        if (it.type === 'image') {
+          placeImage({ ...getImagePayload(it.id), x: nx, y: ny }, { silent: true });
+        } else if (it.type === 'text') {
+          placeText({ ...getTextPayload(it.id), x: nx, y: ny }, { silent: true });
+        } else if (it.type === 'compare') {
+          placeCompare({ ...getComparePayload(it.id), x: nx, y: ny }, { silent: true });
+        }
+      });
+      updateSelectionBox();
+      return;
+    }
+
+    if (interaction.mode === 'resize-group') {
+      const excl = new Set(interaction.items.map((i) => i.id));
+      const r = snapAspectResize(world, interaction, interaction.W / interaction.H, excl);
+      const s = clamp(r.width / interaction.W, 0.05, 50);
+      showSnapGuides(r.guideX, r.guideY);
+      interaction.items.forEach((it) => {
+        const nx = interaction.fixedX + (it.x - interaction.fixedX) * s;
+        const ny = interaction.fixedY + (it.y - interaction.fixedY) * s;
+        if (it.type === 'image') {
+          placeImage(
+            { ...getImagePayload(it.id), x: nx, y: ny, width: it.width * s },
+            { silent: true },
+          );
+        } else if (it.type === 'text') {
+          placeText(
+            {
+              ...getTextPayload(it.id),
+              x: nx,
+              y: ny,
+              width: it.width * s,
+              size: Math.max(6, Math.round(it.size * s)),
+              minHeight: it.minHeight * s,
+            },
+            { silent: true },
+          );
+        } else if (it.type === 'compare') {
+          placeCompare(
+            { ...getComparePayload(it.id), x: nx, y: ny, width: it.width * s, height: it.height * s },
+            { silent: true },
+          );
+        }
+      });
+      updateSelectionBox();
+      return;
+    }
+
+    if (interaction.mode === 'resize-text') {
+      const payload = getTextPayload(interaction.id);
+      if (payload) {
+        const th = SNAP_PX / camera.zoom;
+        const excl = new Set([interaction.id]);
+        const sx = snapValue(world.x, snapLinesX(excl), th);
+        const sy = snapValue(world.y, snapLinesY(excl), th);
+        const newWidth = clamp(Math.abs(sx.snapped - interaction.fixedX), 24, WORLD.width);
+        const minH = Math.max(20, Math.round(payload.size * 1.2));
+        const newHeight = clamp(Math.abs(sy.snapped - interaction.fixedY), minH, WORLD.height);
+        const isLeft = interaction.corner === 'nw' || interaction.corner === 'sw';
+        const isTop = interaction.corner === 'nw' || interaction.corner === 'ne';
+        const newX = isLeft ? interaction.fixedX - newWidth : interaction.fixedX;
+        const newY = isTop ? interaction.fixedY - newHeight : interaction.fixedY;
+        showSnapGuides(sx.guide, sy.guide);
+        placeText(
+          { ...payload, x: newX, y: newY, width: newWidth, minHeight: newHeight },
+          { silent: true },
+        );
+      }
+      return;
+    }
+
+    if (interaction.mode === 'move-text') {
+      const textItem = getTextItem(interaction.id);
+      if (textItem) {
+        const p = applySnap(
+          new Set([interaction.id]),
+          world.x - interaction.offsetX,
+          world.y - interaction.offsetY,
+          textItem.offsetWidth,
+          textItem.offsetHeight,
+        );
+        placeText({ ...getTextPayload(interaction.id), x: p.x, y: p.y }, { silent: true });
+      }
+      return;
+    }
+
+    if (interaction.mode === 'wipe') {
+      const cmp = getCompareItem(interaction.id);
+      if (cmp) {
+        const W = Number(cmp.dataset.width || 1);
+        const split = clamp((world.x - Number(cmp.dataset.x || 0)) / W, 0, 1);
+        cmp.dataset.split = String(split);
+        applyCompareLayout(cmp);
+        broadcastCompareThrottled(interaction.id);
+      }
+      return;
+    }
+
+    if (interaction.mode === 'move-compare') {
+      const cmp = getCompareItem(interaction.id);
+      if (cmp) {
+        const p = applySnap(
+          new Set([interaction.id]),
+          world.x - interaction.offsetX,
+          world.y - interaction.offsetY,
+          cmp.offsetWidth,
+          cmp.offsetHeight,
+        );
+        placeCompare({ ...getComparePayload(interaction.id), x: p.x, y: p.y }, { silent: true });
+      }
+      return;
+    }
+
+    if (interaction.mode === 'resize-compare') {
+      const payload = getComparePayload(interaction.id);
+      if (payload) {
+        const r = snapAspectResize(world, interaction, interaction.aspect, new Set([interaction.id]));
+        const newWidth = clamp(r.width, 40, WORLD.width);
+        const newHeight = newWidth / interaction.aspect;
+        const isLeft = interaction.corner === 'nw' || interaction.corner === 'sw';
+        const isTop = interaction.corner === 'nw' || interaction.corner === 'ne';
+        const newX = isLeft ? interaction.fixedX - newWidth : interaction.fixedX;
+        const newY = isTop ? interaction.fixedY - newHeight : interaction.fixedY;
+        showSnapGuides(r.guideX, r.guideY);
+        placeCompare(
+          { ...payload, x: newX, y: newY, width: newWidth, height: newHeight },
+          { silent: true },
+        );
+      }
+      return;
+    }
+
     const item = getImageItem(interaction.id);
     if (!item) return;
 
     if (interaction.mode === 'move-image') {
-      const x = world.x - interaction.offsetX;
-      const y = world.y - interaction.offsetY;
-      placeImage({ ...getImagePayload(interaction.id), x, y }, { silent: true });
+      const p = applySnap(
+        new Set([interaction.id]),
+        world.x - interaction.offsetX,
+        world.y - interaction.offsetY,
+        item.offsetWidth,
+        item.offsetHeight,
+      );
+      placeImage({ ...getImagePayload(interaction.id), x: p.x, y: p.y }, { silent: true });
     } else if (interaction.mode === 'resize-image') {
-      const delta = Math.max(world.x - interaction.startX, world.y - interaction.startY);
-      const width = clamp(interaction.startWidth + delta, 40, WORLD.width);
-      placeImage({ ...getImagePayload(interaction.id), width }, { silent: true });
+      const r = snapAspectResize(world, interaction, interaction.aspect, new Set([interaction.id]));
+      const newWidth = clamp(r.width, 40, WORLD.width);
+      const newHeight = newWidth / interaction.aspect;
+      const isLeft = interaction.corner === 'nw' || interaction.corner === 'sw';
+      const isTop = interaction.corner === 'nw' || interaction.corner === 'ne';
+      const newX = isLeft ? interaction.fixedX - newWidth : interaction.fixedX;
+      const newY = isTop ? interaction.fixedY - newHeight : interaction.fixedY;
+      showSnapGuides(r.guideX, r.guideY);
+      placeImage(
+        { ...getImagePayload(interaction.id), x: newX, y: newY, width: newWidth },
+        { silent: true },
+      );
     }
 
     return;
@@ -906,11 +2246,61 @@ function pointerUp(event) {
   }
 
   if (interaction && event.pointerId === interaction.pointerId) {
-    const payload = getImagePayload(interaction.id);
-    if (payload) {
-      broadcast('image-update', payload);
-      pushHistory('image-transform');
+    const mode = interaction.mode;
+    if (mode === 'marquee') {
+      finishMarquee(event);
+    } else if (mode === 'create-text') {
+      finishCreateText(event);
+    } else if (mode === 'move-group') {
+      interaction.items.forEach((it) => {
+        if (it.type === 'image') {
+          const p = getImagePayload(it.id);
+          if (p) broadcast('image-update', p);
+        } else if (it.type === 'text') {
+          const p = getTextPayload(it.id);
+          if (p) broadcast('text-update', p);
+        } else if (it.type === 'compare') {
+          const p = getComparePayload(it.id);
+          if (p) broadcast('compare-update', p);
+        }
+      });
+      pushHistory('move-group');
+      updateSelectionBox();
+    } else if (mode === 'resize-group') {
+      interaction.items.forEach((it) => {
+        if (it.type === 'image') {
+          const p = getImagePayload(it.id);
+          if (p) broadcast('image-update', p);
+        } else if (it.type === 'text') {
+          const p = getTextPayload(it.id);
+          if (p) broadcast('text-update', p);
+        } else if (it.type === 'compare') {
+          const p = getComparePayload(it.id);
+          if (p) broadcast('compare-update', p);
+        }
+      });
+      pushHistory('resize-group');
+      updateSelectionBox();
+    } else if (mode === 'move-text' || mode === 'resize-text') {
+      const payload = getTextPayload(interaction.id);
+      if (payload) {
+        broadcast('text-update', payload);
+        pushHistory(mode === 'resize-text' ? 'text-resize' : 'text-move');
+      }
+    } else if (mode === 'wipe' || mode === 'move-compare' || mode === 'resize-compare') {
+      const payload = getComparePayload(interaction.id);
+      if (payload) {
+        broadcast('compare-update', payload);
+        pushHistory(`compare-${mode}`);
+      }
+    } else {
+      const payload = getImagePayload(interaction.id);
+      if (payload) {
+        broadcast('image-update', payload);
+        pushHistory('image-transform');
+      }
     }
+    hideSnapGuides();
     interaction = null;
   }
 
@@ -1023,6 +2413,11 @@ window.addEventListener('keydown', (event) => {
       setTool('pen');
       return;
     }
+    if (loweredKey === 't') {
+      event.preventDefault();
+      setTool('text');
+      return;
+    }
     if (loweredKey === 'e') {
       event.preventDefault();
       setTool('eraser');
@@ -1081,25 +2476,43 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (loweredKey === 'c' && selectedImageId) {
+  if (loweredKey === 'c' && selectedIds.size > 0 && !isTypingTarget(event.target)) {
     event.preventDefault();
-    copiedImagePayload = getImagePayload(selectedImageId);
+    clipboardElements = [...selectedIds]
+      .map((id) => {
+        const type = elTypeOf(getElById(id));
+        if (type === 'image') return { _type: 'image', ...getImagePayload(id) };
+        if (type === 'text') return { _type: 'text', ...getTextPayload(id) };
+        if (type === 'compare') return { _type: 'compare', ...getComparePayload(id) };
+        return null;
+      })
+      .filter(Boolean);
     return;
   }
 
   if (loweredKey === 'v') {
-    if (!copiedImagePayload) return;
+    if (!clipboardElements.length || isTypingTarget(event.target)) return;
     event.preventDefault();
-    const duplicated = {
-      ...copiedImagePayload,
-      id: crypto.randomUUID(),
-      x: copiedImagePayload.x + 24,
-      y: copiedImagePayload.y + 24,
-    };
-    placeImage(duplicated, { silent: true });
-    broadcast('image-update', duplicated);
-    pushHistory('paste-image');
-    setSelectedImage(duplicated.id);
+    const newIds = [];
+    clipboardElements.forEach((src) => {
+      const id = crypto.randomUUID();
+      const payload = { ...src, id, x: (src.x || 0) + 24, y: (src.y || 0) + 24 };
+      if (src._type === 'image') {
+        placeImage(payload, { silent: true });
+        broadcast('image-update', getImagePayload(id));
+      } else if (src._type === 'text') {
+        placeText(payload, { silent: true });
+        broadcast('text-update', getTextPayload(id));
+      } else if (src._type === 'compare') {
+        placeCompare(payload, { silent: true });
+        broadcast('compare-update', getComparePayload(id));
+      }
+      newIds.push(id);
+    });
+    selectedIds.clear();
+    newIds.forEach((id) => selectedIds.add(id));
+    refreshSelectionUI();
+    pushHistory('paste-elements');
     return;
   }
 
@@ -1169,6 +2582,60 @@ brushSize.addEventListener('input', () => {
   updateToolCursorSize();
 });
 
+// --- Text options (size + color) -------------------------------------------
+function applyTextSizeLive(size) {
+  textSize = clamp(Math.round(size), 10, 400);
+  if (textSizeValue) textSizeValue.textContent = String(textSize);
+  if (selectedTextId) {
+    const item = getTextItem(selectedTextId);
+    if (item) {
+      item.dataset.size = String(textSize);
+      item.style.fontSize = `${textSize}px`;
+      broadcastTextUpdateThrottled(selectedTextId);
+    }
+  }
+}
+
+function applyTextColorLive(color) {
+  textColor = color;
+  if (textColorSwatch) textColorSwatch.style.background = color;
+  if (selectedTextId) {
+    const item = getTextItem(selectedTextId);
+    if (item) {
+      item.dataset.color = color;
+      item.style.color = color;
+      broadcastTextUpdateThrottled(selectedTextId);
+    }
+  }
+}
+
+if (textSizeInput) {
+  textSizeInput.addEventListener('input', () => applyTextSizeLive(Number(textSizeInput.value)));
+  textSizeInput.addEventListener('change', () => {
+    applyTextSizeLive(Number(textSizeInput.value));
+    if (selectedTextId) {
+      broadcast('text-update', getTextPayload(selectedTextId));
+      pushHistory('text-size');
+    }
+  });
+}
+
+if (textColorPicker) {
+  textColorPicker.addEventListener('input', () => applyTextColorLive(textColorPicker.value));
+  textColorPicker.addEventListener('change', () => {
+    applyTextColorLive(textColorPicker.value);
+    if (selectedTextId) {
+      broadcast('text-update', getTextPayload(selectedTextId));
+      pushHistory('text-color');
+    }
+  });
+}
+
+if (textColorButton) {
+  textColorButton.addEventListener('click', () => textColorPicker.click());
+}
+if (textColorSwatch) textColorSwatch.style.background = textColor;
+
 toolButtons.forEach((btn) => {
   btn.addEventListener('click', () => setTool(btn.dataset.tool));
 });
@@ -1192,6 +2659,7 @@ function importImageFile(file, point = { x: 30, y: 30 }) {
       width: 220,
     };
     placeImage(payload, { silent: true });
+    selectOnly(payload.id);
     broadcast('image-update', payload);
     pushHistory('import-image');
   };
@@ -1231,11 +2699,20 @@ board.addEventListener('drop', (event) => {
 window.addEventListener('paste', (event) => {
   if (isTypingTarget(event.target)) return;
 
-  const itemFiles = [...(event.clipboardData?.items || [])]
-    .filter((item) => item.type.startsWith('image/'))
-    .map((item) => item.getAsFile())
-    .filter(Boolean);
-  const files = uniqueImageFiles([...(event.clipboardData?.files || []), ...itemFiles]);
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+
+  // A pasted image usually appears in BOTH clipboardData.files and
+  // clipboardData.items, which previously caused the same image to be added
+  // twice. Use files when available, and only fall back to items otherwise.
+  let files = [...(clipboard.files || [])].filter((file) => file.type.startsWith('image/'));
+  if (!files.length) {
+    files = [...(clipboard.items || [])]
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+  }
+  files = uniqueImageFiles(files);
   if (!files.length) return;
 
   event.preventDefault();
@@ -1268,16 +2745,32 @@ resetBoardBtn.addEventListener('click', () => {
   imageLayer.innerHTML = '';
   syncImageZIndices();
   setSelectedImage(null);
+  textLayer.innerHTML = '';
+  selectedTextId = null;
+  textEditingId = null;
+  compareLayer.innerHTML = '';
   broadcast('reset-all');
   pushHistory('reset-board');
 });
 
+if (makeCompareBtn) {
+  makeCompareBtn.addEventListener('click', () => {
+    createCompareFromSelection();
+  });
+}
+
 window.addEventListener('keydown', (event) => {
   if (isTypingTarget(event.target)) return;
-  if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImageId) {
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    if (selectedIds.size === 0) return;
     event.preventDefault();
-    removeImage(selectedImageId);
-    pushHistory('delete-image');
+    [...selectedIds].forEach((id) => {
+      if (getImageItem(id)) removeImage(id);
+      else if (getTextItem(id)) removeText(id);
+      else if (getCompareItem(id)) removeCompare(id);
+    });
+    clearSelection();
+    pushHistory('delete-selection');
   }
 });
 
@@ -1351,9 +2844,17 @@ function handleRealtimeMessage(message) {
     imageLayer.innerHTML = '';
     syncImageZIndices();
     setSelectedImage(null);
+    textLayer.innerHTML = '';
+    selectedTextId = null;
+    textEditingId = null;
+    compareLayer.innerHTML = '';
   }
   if (type === 'image-update') placeImage(payload, { silent: true });
   if (type === 'image-remove') removeImage(payload.id, { silent: true });
+  if (type === 'text-update' && payload?.id) placeText(payload, { silent: true });
+  if (type === 'text-remove' && payload?.id) removeText(payload.id, { silent: true });
+  if (type === 'compare-update' && payload?.id) placeCompare(payload, { silent: true });
+  if (type === 'compare-remove' && payload?.id) removeCompare(payload.id, { silent: true });
   if (type === 'image-order' && payload?.order) {
     payload.order.forEach((id) => {
       const item = getImageItem(id);
@@ -1395,6 +2896,7 @@ window.addEventListener('blur', () => {
   lastPoint = null;
   lastEraserSyncPoint = null;
   activeStroke = null;
+  hideSnapGuides();
   hideToolCursor();
   updateCursor();
 });

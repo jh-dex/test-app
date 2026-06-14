@@ -20,21 +20,38 @@ const MIME = {
 
 const clients = new Set();
 
+// Authoritative board state for late-joiner sync.
+// Clients push a full snapshot ('state-store') after each committed change;
+// the server keeps only the latest one and replays it to anyone who connects.
+let boardSnapshot = null;
+
 function sendSse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function broadcast(payload) {
+function broadcast(payload, exclude) {
   for (const client of clients) {
+    if (client === exclude) continue;
     sendSse(client, payload);
   }
+}
+
+function snapshotMessage() {
+  return {
+    id: `srv-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'board-state',
+    source: 'server',
+    payload: boardSnapshot,
+    sentAt: Date.now(),
+  };
 }
 
 function safeFilePath(urlPath) {
   const sanitized = decodeURIComponent(urlPath.split('?')[0]);
   const relative = sanitized === '/' ? '/index.html' : sanitized;
   const fullPath = path.normalize(path.join(ROOT, relative));
-  if (!fullPath.startsWith(ROOT)) return null;
+  // Guard against path traversal: must stay inside ROOT.
+  if (fullPath !== ROOT && !fullPath.startsWith(ROOT + path.sep)) return null;
   return fullPath;
 }
 
@@ -48,6 +65,11 @@ const server = http.createServer((req, res) => {
     });
     res.write(': connected\n\n');
     clients.add(res);
+
+    // Replay current board to the freshly connected client only.
+    if (boardSnapshot) {
+      sendSse(res, snapshotMessage());
+    }
 
     req.on('close', () => {
       clients.delete(res);
@@ -67,6 +89,15 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const payload = JSON.parse(body || '{}');
+
+        // State snapshots are stored, not relayed (avoids flicker on peers).
+        if (payload && payload.type === 'state-store') {
+          boardSnapshot = payload.payload || null;
+          res.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
+          res.end();
+          return;
+        }
+
         broadcast(payload);
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',

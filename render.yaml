@@ -1,0 +1,10 @@
+# Render Blueprint — 무료 Node 호스팅으로 Live Board 배포
+# https://render.com 에서 이 저장소를 연결하면 이 파일을 자동으로 읽습니다.
+services:
+  - type: web
+    name: live-board-mvp
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    # Render가 PORT 환경변수를 자동 주입하고, server.js가 이를 사용합니다.
