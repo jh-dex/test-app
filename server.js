@@ -88,20 +88,22 @@ const server = http.createServer((req, res) => {
     });
     req.on('end', () => {
       try {
-        const payload = JSON.parse(body || '{}');
+        const data = JSON.parse(body || '{}');
+        // Clients coalesce messages per animation frame into a single POST
+        // ({ batch: [...] }). Accept both batched and single-message bodies.
+        const messages = Array.isArray(data.batch) ? data.batch : [data];
 
-        // State snapshots are stored, not relayed (avoids flicker on peers).
-        if (payload && payload.type === 'state-store') {
-          boardSnapshot = payload.payload || null;
-          res.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
-          res.end();
-          return;
+        for (const msg of messages) {
+          if (!msg) continue;
+          // State snapshots are stored, not relayed (avoids flicker on peers).
+          if (msg.type === 'state-store') {
+            boardSnapshot = msg.payload || null;
+          } else {
+            broadcast(msg);
+          }
         }
 
-        broadcast(payload);
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-        });
+        res.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
         res.end();
       } catch {
         res.writeHead(400);

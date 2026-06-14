@@ -72,6 +72,7 @@ const liveStrokes = new Map();
 const ERASER_SYNC_THROTTLE_MS = 24;
 let lastEraserSyncAt = 0;
 let lastEraserSyncPoint = null;
+let eraserPath = [];
 
 const camera = {
   x: 0,
@@ -166,21 +167,61 @@ function connectSyncStream() {
   });
 }
 
+// Outbound messages are coalesced and flushed once per animation frame as a
+// single POST (Figma-style per-frame batching). This collapses the dozens of
+// per-point/per-segment POSTs made while drawing into ~60 requests/sec max,
+// which removes the HTTP connection-limit queueing that caused lag.
+let outboundQueue = [];
+let flushScheduled = false;
+
+function flushOutbound() {
+  flushScheduled = false;
+  if (!outboundQueue.length) return;
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) {
+    outboundQueue = [];
+    return;
+  }
+  const batch = outboundQueue;
+  outboundQueue = [];
+  fetch(`${baseUrl}/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ batch }),
+  }).catch(() => {
+    // Transient failure (wifi blip, server restart): re-queue at the front and
+    // retry shortly so changes aren't silently lost. Bounded to avoid blowup.
+    outboundQueue = batch.concat(outboundQueue);
+    const MAX = 4000;
+    if (outboundQueue.length > MAX) {
+      outboundQueue = outboundQueue.slice(outboundQueue.length - MAX);
+    }
+    setTimeout(scheduleFlush, 800);
+  });
+}
+
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(flushOutbound);
+  } else {
+    setTimeout(flushOutbound, 16);
+  }
+}
+
+function queueForServer(message) {
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) return;
+  outboundQueue.push(message);
+  scheduleFlush();
+}
+
 function emitRealtimeMessage(message) {
   if (channel) {
     channel.postMessage(message);
   }
-
-  const baseUrl = resolveSyncBaseUrl();
-  if (!baseUrl) return;
-  fetch(`${baseUrl}/sync`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(message),
-    keepalive: true,
-  }).catch(() => {
-    // ignore transport errors; local channel still works
-  });
+  queueForServer(message);
 }
 
 // --- Authoritative state sync (for late joiners) ---------------------------
@@ -192,21 +233,12 @@ let stateSyncTimer = null;
 function sendStateToServer() {
   const baseUrl = resolveSyncBaseUrl();
   if (!baseUrl) return;
-  const snapshot = snapshotBoardState();
-  const message = {
+  queueForServer({
     id: crypto.randomUUID(),
     type: 'state-store',
     source: clientId,
-    payload: snapshot,
+    payload: snapshotBoardState(),
     sentAt: Date.now(),
-  };
-  fetch(`${baseUrl}/sync`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(message),
-    keepalive: true,
-  }).catch(() => {
-    // ignore; live channel still works, snapshot will resend on next change
   });
 }
 
@@ -1149,8 +1181,10 @@ function placeCompare(payload, { silent = false } = {}) {
   item.dataset.height = String(H);
   item.dataset.split = String(clamp(Number(payload.split ?? 0.5), 0, 1));
   item.dataset.orientation = payload.orientation || 'v';
-  item.dataset.srca = payload.srcA || '';
-  item.dataset.srcb = payload.srcB || '';
+  // Preserve existing images when src is omitted (e.g. geometry-only drag
+  // updates) — otherwise live drag would wipe the compare's pictures.
+  if (payload.srcA !== undefined) item.dataset.srca = payload.srcA;
+  if (payload.srcB !== undefined) item.dataset.srcb = payload.srcB;
   item.style.left = `${safeX}px`;
   item.style.top = `${safeY}px`;
 
@@ -1209,6 +1243,41 @@ function broadcastCompareThrottled(id) {
   }, 70);
 }
 
+// --- Live drag/resize broadcast (throttled, geometry-only) -----------------
+// While dragging/resizing, push lightweight updates so peers see the motion in
+// real time. We strip base64 (src) so we don't re-send whole images each tick.
+const DRAG_SYNC_MS = 40;
+let lastDragSyncAt = 0;
+function dragSyncDue() {
+  const now = Date.now();
+  if (now - lastDragSyncAt >= DRAG_SYNC_MS) {
+    lastDragSyncAt = now;
+    return true;
+  }
+  return false;
+}
+
+function liveBroadcast(id) {
+  const type = elTypeOf(getElById(id));
+  if (type === 'image') {
+    const p = getImagePayload(id);
+    if (p) {
+      delete p.src; // keep existing image on peers; send geometry only
+      broadcast('image-update', p);
+    }
+  } else if (type === 'compare') {
+    const p = getComparePayload(id);
+    if (p) {
+      delete p.srcA;
+      delete p.srcB;
+      broadcast('compare-update', p);
+    }
+  } else if (type === 'text') {
+    const p = getTextPayload(id);
+    if (p) broadcast('text-update', p);
+  }
+}
+
 function updateCompareButton() {
   if (!makeCompareBtn) return;
   const imageCount = [...selectedIds].filter((id) => getImageItem(id)).length;
@@ -1243,6 +1312,9 @@ function createCompareFromSelection() {
 }
 
 function makeHistoryFingerprint(images, texts = [], compares = []) {
+  // Content-based drawing signature (not just count): an eraser can replace a
+  // stroke with a fragment of the same count, so length alone misses changes.
+  const drawingSignature = drawingOps.map((s) => `${s.id}:${s.points.length}`).join('|');
   const imageSignature = images
     .map((image) => `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}`)
     .join('|');
@@ -1252,7 +1324,7 @@ function makeHistoryFingerprint(images, texts = [], compares = []) {
   const compareSignature = compares
     .map((c) => `${c.id}:${c.x}:${c.y}:${c.width}:${c.height}:${c.split}:${c.orientation}`)
     .join('|');
-  return `${drawingOps.length}::${imageSignature}::${textSignature}::${compareSignature}`;
+  return `${drawingSignature}::${imageSignature}::${textSignature}::${compareSignature}`;
 }
 
 function snapshotBoardState() {
@@ -1957,6 +2029,7 @@ function pointerDown(event) {
   if (activeTool === 'eraser') {
     isDrawing = true;
     lastPoint = eventToWorld(event);
+    eraserPath = [{ ...lastPoint }];
     const radius = getEraserRadius();
     eraseWithCapsule(lastPoint, lastPoint, radius);
     lastEraserSyncPoint = { ...lastPoint };
@@ -2052,6 +2125,7 @@ function pointerMove(event) {
           placeCompare({ ...getComparePayload(it.id), x: nx, y: ny }, { silent: true });
         }
       });
+      if (dragSyncDue()) interaction.items.forEach((it) => liveBroadcast(it.id));
       updateSelectionBox();
       return;
     }
@@ -2088,6 +2162,7 @@ function pointerMove(event) {
           );
         }
       });
+      if (dragSyncDue()) interaction.items.forEach((it) => liveBroadcast(it.id));
       updateSelectionBox();
       return;
     }
@@ -2111,6 +2186,7 @@ function pointerMove(event) {
           { ...payload, x: newX, y: newY, width: newWidth, minHeight: newHeight },
           { silent: true },
         );
+        if (dragSyncDue()) liveBroadcast(interaction.id);
       }
       return;
     }
@@ -2126,6 +2202,7 @@ function pointerMove(event) {
           textItem.offsetHeight,
         );
         placeText({ ...getTextPayload(interaction.id), x: p.x, y: p.y }, { silent: true });
+        if (dragSyncDue()) liveBroadcast(interaction.id);
       }
       return;
     }
@@ -2137,7 +2214,7 @@ function pointerMove(event) {
         const split = clamp((world.x - Number(cmp.dataset.x || 0)) / W, 0, 1);
         cmp.dataset.split = String(split);
         applyCompareLayout(cmp);
-        broadcastCompareThrottled(interaction.id);
+        if (dragSyncDue()) liveBroadcast(interaction.id);
       }
       return;
     }
@@ -2153,6 +2230,7 @@ function pointerMove(event) {
           cmp.offsetHeight,
         );
         placeCompare({ ...getComparePayload(interaction.id), x: p.x, y: p.y }, { silent: true });
+        if (dragSyncDue()) liveBroadcast(interaction.id);
       }
       return;
     }
@@ -2172,6 +2250,7 @@ function pointerMove(event) {
           { ...payload, x: newX, y: newY, width: newWidth, height: newHeight },
           { silent: true },
         );
+        if (dragSyncDue()) liveBroadcast(interaction.id);
       }
       return;
     }
@@ -2188,6 +2267,7 @@ function pointerMove(event) {
         item.offsetHeight,
       );
       placeImage({ ...getImagePayload(interaction.id), x: p.x, y: p.y }, { silent: true });
+      if (dragSyncDue()) liveBroadcast(interaction.id);
     } else if (interaction.mode === 'resize-image') {
       const r = snapAspectResize(world, interaction, interaction.aspect, new Set([interaction.id]));
       const newWidth = clamp(r.width, 40, WORLD.width);
@@ -2201,6 +2281,7 @@ function pointerMove(event) {
         { ...getImagePayload(interaction.id), x: newX, y: newY, width: newWidth },
         { silent: true },
       );
+      if (dragSyncDue()) liveBroadcast(interaction.id);
     }
 
     return;
@@ -2216,6 +2297,7 @@ function pointerMove(event) {
   }
   if (activeTool === 'eraser') {
     eraseWithCapsule(lastPoint, current, getEraserRadius());
+    eraserPath.push({ ...current });
     const now = Date.now();
     if (now - lastEraserSyncAt >= ERASER_SYNC_THROTTLE_MS) {
       broadcast('erase-segment', {
@@ -2306,10 +2388,11 @@ function pointerUp(event) {
 
   if (isDrawing && event.button === 0) {
     if (activeTool === 'eraser') {
-      if (lastEraserSyncPoint && lastPoint) {
-        broadcast('erase-segment', {
-          from: lastEraserSyncPoint,
-          to: lastPoint,
+      // Authoritative final erase: replay the whole eraser path so peers that
+      // dropped some incremental erase-segment messages still converge.
+      if (eraserPath.length) {
+        broadcast('erase-path', {
+          points: eraserPath.map((p) => ({ ...p })),
           size: Number(brushSize.value),
         });
       }
@@ -2317,6 +2400,7 @@ function pointerUp(event) {
       isDrawing = false;
       lastPoint = null;
       lastEraserSyncPoint = null;
+      eraserPath = [];
       activeStroke = null;
       return;
     }
@@ -2329,7 +2413,15 @@ function pointerUp(event) {
         points: activeStroke.points.map((point) => ({ ...point })),
       });
       liveStrokes.delete(activeStroke.id);
-      broadcast('stroke-end', { id: activeStroke.id });
+      // Send the COMPLETE stroke (not just the id) so a peer renders the full
+      // line even if some stroke-append messages were lost or reordered.
+      broadcast('stroke-end', {
+        id: activeStroke.id,
+        color: activeStroke.color,
+        size: activeStroke.size,
+        tool: activeStroke.tool,
+        points: activeStroke.points.map((point) => ({ ...point })),
+      });
     }
     pushHistory('draw-stroke');
   }
@@ -2802,15 +2894,28 @@ function handleRealtimeMessage(message) {
   }
   if (type === 'stroke-end' && payload?.id) {
     const remoteStroke = liveStrokes.get(payload.id);
-    if (remoteStroke) {
-      drawingOps.push({
-        id: remoteStroke.id,
-        color: remoteStroke.color,
-        size: remoteStroke.size,
-        tool: remoteStroke.tool,
-        points: remoteStroke.points.map((point) => ({ ...point })),
-      });
+    // Prefer the authoritative full points carried by stroke-end; fall back to
+    // whatever was accumulated from stroke-append messages.
+    const finalPoints =
+      Array.isArray(payload.points) && payload.points.length
+        ? payload.points.map((point) => ({ ...point }))
+        : remoteStroke
+          ? remoteStroke.points.map((point) => ({ ...point }))
+          : null;
+    if (finalPoints) {
+      const finalStroke = {
+        id: payload.id,
+        color: (remoteStroke && remoteStroke.color) || payload.color || '#000000',
+        size: Number((remoteStroke && remoteStroke.size) ?? payload.size ?? 4),
+        tool: (remoteStroke && remoteStroke.tool) || payload.tool || 'pen',
+        points: finalPoints,
+      };
+      // Remove any partial live copy and de-dupe, then commit the full stroke.
+      removeStrokePath(payload.id);
+      drawingOps = drawingOps.filter((s) => s.id !== payload.id);
       liveStrokes.delete(payload.id);
+      drawingOps.push(finalStroke);
+      renderStroke(finalStroke);
     }
   }
   if (type === 'draw' && payload?.from && payload?.to) {
@@ -2836,6 +2941,18 @@ function handleRealtimeMessage(message) {
   if (type === 'erase-segment' && payload?.from && payload?.to) {
     const r = Number(payload.size || 4) / 2;
     eraseWithCapsule(payload.from, payload.to, r);
+  }
+  if (type === 'erase-path' && Array.isArray(payload?.points)) {
+    // Authoritative final erase: replay the whole path so dropped segments converge.
+    const r = Number(payload.size || 4) / 2;
+    const pts = payload.points;
+    if (pts.length === 1) {
+      eraseWithCapsule(pts[0], pts[0], r);
+    } else {
+      for (let i = 1; i < pts.length; i += 1) {
+        eraseWithCapsule(pts[i - 1], pts[i], r);
+      }
+    }
   }
   if (type === 'reset-all') {
     drawingOps = [];
