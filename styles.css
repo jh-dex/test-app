@@ -326,7 +326,8 @@ input[type='range'] {
 
 .text-draft {
   position: absolute;
-  border: 1px dashed var(--accent-blue);
+  border: dashed var(--accent-blue);
+  border-width: calc(1px / var(--zoom, 1));
   background: rgba(59, 130, 246, 0.08);
   pointer-events: none;
   z-index: 5;
@@ -335,7 +336,8 @@ input[type='range'] {
 
 .marquee {
   position: absolute;
-  border: 1px solid var(--accent-blue);
+  border: solid var(--accent-blue);
+  border-width: calc(1px / var(--zoom, 1));
   background: var(--accent-soft);
   pointer-events: none;
   z-index: 6;
@@ -410,12 +412,12 @@ input[type='range'] {
 
 .snap-guide-v {
   top: 0;
-  width: 1px;
+  width: calc(1px / var(--zoom, 1));
 }
 
 .snap-guide-h {
   left: 0;
-  height: 1px;
+  height: calc(1px / var(--zoom, 1));
 }
 
 button {
@@ -684,8 +686,8 @@ kbd {
   position: absolute;
   top: 0;
   height: 100%;
-  width: 16px; /* wide hit area */
-  margin-left: -8px;
+  width: calc(16px / var(--zoom, 1)); /* wide hit area, constant on-screen */
+  margin-left: calc(-8px / var(--zoom, 1));
   background: transparent;
   cursor: ew-resize;
   pointer-events: auto;
@@ -699,7 +701,7 @@ kbd {
   top: 0;
   bottom: 0;
   left: 50%;
-  width: 1px;
+  width: calc(1px / var(--zoom, 1));
   transform: translateX(-50%);
   background: #ffffff;
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.3);
@@ -710,8 +712,8 @@ kbd {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 14px;
-  height: 14px;
+  width: calc(14px / var(--zoom, 1));
+  height: calc(14px / var(--zoom, 1));
   border-radius: var(--radius-pill);
   background: #ffffff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
@@ -722,8 +724,8 @@ kbd {
 }
 
 .compare-handle svg {
-  width: 10px;
-  height: 10px;
+  width: calc(10px / var(--zoom, 1));
+  height: calc(10px / var(--zoom, 1));
 }
 
 .compare-item:hover:not(.is-selected):not(.is-multi) {
