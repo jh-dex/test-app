@@ -1263,6 +1263,7 @@ function liveBroadcast(id) {
     const p = getImagePayload(id);
     if (p) {
       delete p.src; // keep existing image on peers; send geometry only
+      p.transient = true;
       broadcast('image-update', p);
     }
   } else if (type === 'compare') {
@@ -1270,11 +1271,15 @@ function liveBroadcast(id) {
     if (p) {
       delete p.srcA;
       delete p.srcB;
+      p.transient = true;
       broadcast('compare-update', p);
     }
   } else if (type === 'text') {
     const p = getTextPayload(id);
-    if (p) broadcast('text-update', p);
+    if (p) {
+      p.transient = true;
+      broadcast('text-update', p);
+    }
   }
 }
 
@@ -1311,10 +1316,15 @@ function createCompareFromSelection() {
   pushHistory('create-compare');
 }
 
-function makeHistoryFingerprint(images, texts = [], compares = []) {
+function makeHistoryFingerprint(images, texts = [], compares = [], strokes = drawingOps) {
   // Content-based drawing signature (not just count): an eraser can replace a
   // stroke with a fragment of the same count, so length alone misses changes.
-  const drawingSignature = drawingOps.map((s) => `${s.id}:${s.points.length}`).join('|');
+  const drawingSignature = strokes
+    .map((s) => {
+      const points = (s.points || []).map((p) => `${Math.round(p.x * 10) / 10},${Math.round(p.y * 10) / 10}`).join(';');
+      return `${s.id}:${s.color}:${s.size}:${s.tool}:${points}`;
+    })
+    .join('|');
   const imageSignature = images
     .map((image) => `${image.id}:${image.x}:${image.y}:${image.width}:${image.src.length}`)
     .join('|');
@@ -1331,20 +1341,60 @@ function snapshotBoardState() {
   const images = serializeImages();
   const texts = serializeTexts();
   const compares = serializeCompares();
+  const strokes = drawingOps.map((stroke) => ({
+    ...stroke,
+    points: stroke.points.map((point) => ({ ...point })),
+  }));
   return {
-    drawingOps: drawingOps.map((stroke) => ({
-      ...stroke,
-      points: stroke.points.map((point) => ({ ...point })),
-    })),
+    drawingOps: strokes,
     images,
     texts,
     compares,
-    fingerprint: makeHistoryFingerprint(images, texts, compares),
+    fingerprint: makeHistoryFingerprint(images, texts, compares, strokes),
   };
 }
 
-function restoreBoardState(state, { broadcastRestore = false } = {}) {
+function cloneBoardSnapshot(snapshot) {
+  return {
+    drawingOps: (snapshot.drawingOps || []).map((stroke) => ({
+      ...stroke,
+      points: (stroke.points || []).map((point) => ({ ...point })),
+    })),
+    images: (snapshot.images || []).map((payload) => ({ ...payload })),
+    texts: (snapshot.texts || []).map((payload) => ({ ...payload })),
+    compares: (snapshot.compares || []).map((payload) => ({ ...payload })),
+    fingerprint: snapshot.fingerprint,
+  };
+}
+
+function appendHistorySnapshot(snapshot) {
+  if (!snapshot) return false;
+  const next = cloneBoardSnapshot(snapshot);
+  if (!next.fingerprint) {
+    next.fingerprint = makeHistoryFingerprint(next.images, next.texts, next.compares, next.drawingOps);
+  }
+  if (next.fingerprint === historyFingerprint) return false;
+
+  history.splice(historyIndex + 1);
+  history.push(next);
+  if (history.length > HISTORY_LIMIT) {
+    history.shift();
+  }
+  historyIndex = history.length - 1;
+  historyFingerprint = next.fingerprint;
+  return true;
+}
+
+function recordCurrentStateInHistory() {
+  appendHistorySnapshot(snapshotBoardState());
+}
+
+function restoreBoardState(state, { broadcastRestore = false, recordHistory = false } = {}) {
   if (!state) return;
+  const images = Array.isArray(state.images) ? state.images : [];
+  const texts = Array.isArray(state.texts) ? state.texts : [];
+  const compares = Array.isArray(state.compares) ? state.compares : [];
+
   isRestoringHistory = true;
   drawingOps = (state.drawingOps || []).map((stroke) => ({
     ...stroke,
@@ -1353,24 +1403,28 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
   renderDrawingFromOps();
 
   imageLayer.innerHTML = '';
-  state.images.forEach((payload) => placeImage(payload, { silent: true }));
+  images.forEach((payload) => placeImage(payload, { silent: true }));
 
   textLayer.innerHTML = '';
-  (state.texts || []).forEach((payload) => placeText(payload, { silent: true }));
+  texts.forEach((payload) => placeText(payload, { silent: true }));
 
   compareLayer.innerHTML = '';
-  (state.compares || []).forEach((payload) => placeCompare(payload, { silent: true }));
+  compares.forEach((payload) => placeCompare(payload, { silent: true }));
 
   setSelectedImage(null);
   setSelectedText(null);
-  historyFingerprint =
-    state.fingerprint ||
-    makeHistoryFingerprint(state.images || [], state.texts || [], state.compares || []);
+  const restoredSnapshot = snapshotBoardState();
   isRestoringHistory = false;
+
+  if (recordHistory) {
+    appendHistorySnapshot(restoredSnapshot);
+  } else {
+    historyFingerprint = restoredSnapshot.fingerprint;
+  }
 
   if (broadcastRestore) {
     // Live peers get the new state immediately...
-    broadcast('board-state', state);
+    broadcast('board-state', restoredSnapshot);
     // ...and the server's stored snapshot is updated too, so a refresh or a
     // late joiner also sees the result of this undo/redo.
     scheduleStateSync();
@@ -1380,17 +1434,9 @@ function restoreBoardState(state, { broadcastRestore = false } = {}) {
 function pushHistory(reason = '') {
   if (isRestoringHistory) return;
   const snapshot = snapshotBoardState();
-  if (snapshot.fingerprint === historyFingerprint) {
+  if (!appendHistorySnapshot(snapshot)) {
     return;
   }
-
-  history.splice(historyIndex + 1);
-  history.push(snapshot);
-  if (history.length > HISTORY_LIMIT) {
-    history.shift();
-  }
-  historyIndex = history.length - 1;
-  historyFingerprint = snapshot.fingerprint;
 
   // Persist the new state to the server so late joiners receive it.
   // Skip the startup 'initial' push so an empty board never clobbers
@@ -2877,6 +2923,8 @@ function handleRealtimeMessage(message) {
 
   const { type, source, payload } = message;
   if (source === clientId) return;
+  const isTransient = payload?.transient === true;
+  let shouldRecordRemoteHistory = false;
 
   if (type === 'stroke-start' && payload?.id && payload?.point) {
     const remoteStroke = {
@@ -2920,6 +2968,7 @@ function handleRealtimeMessage(message) {
       liveStrokes.delete(payload.id);
       drawingOps.push(finalStroke);
       renderStroke(finalStroke);
+      shouldRecordRemoteHistory = true;
     }
   }
   if (type === 'draw' && payload?.from && payload?.to) {
@@ -2932,11 +2981,13 @@ function handleRealtimeMessage(message) {
     };
     drawingOps.push(fallbackStroke);
     renderStroke(fallbackStroke);
+    shouldRecordRemoteHistory = true;
   }
   if (type === 'clear-drawing') {
     drawingOps = [];
     liveStrokes.clear();
     renderDrawingFromOps();
+    shouldRecordRemoteHistory = true;
   }
   if (type === 'erase-point' && payload?.point) {
     const r = Number(payload.size || 4) / 2;
@@ -2957,6 +3008,7 @@ function handleRealtimeMessage(message) {
         eraseWithCapsule(pts[i - 1], pts[i], r);
       }
     }
+    shouldRecordRemoteHistory = true;
   }
   if (type === 'reset-all') {
     drawingOps = [];
@@ -2969,25 +3021,52 @@ function handleRealtimeMessage(message) {
     selectedTextId = null;
     textEditingId = null;
     compareLayer.innerHTML = '';
+    shouldRecordRemoteHistory = true;
   }
-  if (type === 'image-update') placeImage(payload, { silent: true });
-  if (type === 'image-remove') removeImage(payload.id, { silent: true });
-  if (type === 'text-update' && payload?.id) placeText(payload, { silent: true });
-  if (type === 'text-remove' && payload?.id) removeText(payload.id, { silent: true });
-  if (type === 'compare-update' && payload?.id) placeCompare(payload, { silent: true });
-  if (type === 'compare-remove' && payload?.id) removeCompare(payload.id, { silent: true });
+  if (type === 'image-update' && payload?.id) {
+    placeImage(payload, { silent: true });
+    if (!isTransient) shouldRecordRemoteHistory = true;
+  }
+  if (type === 'image-remove' && payload?.id) {
+    removeImage(payload.id, { silent: true });
+    shouldRecordRemoteHistory = true;
+  }
+  if (type === 'text-update' && payload?.id) {
+    placeText(payload, { silent: true });
+    if (!isTransient) shouldRecordRemoteHistory = true;
+  }
+  if (type === 'text-remove' && payload?.id) {
+    removeText(payload.id, { silent: true });
+    shouldRecordRemoteHistory = true;
+  }
+  if (type === 'compare-update' && payload?.id) {
+    placeCompare(payload, { silent: true });
+    if (!isTransient) shouldRecordRemoteHistory = true;
+  }
+  if (type === 'compare-remove' && payload?.id) {
+    removeCompare(payload.id, { silent: true });
+    shouldRecordRemoteHistory = true;
+  }
   if (type === 'image-order' && payload?.order) {
     payload.order.forEach((id) => {
       const item = getImageItem(id);
       if (item) imageLayer.appendChild(item);
     });
     syncImageZIndices();
+    shouldRecordRemoteHistory = true;
   }
-  if (type === 'board-state') restoreBoardState(payload);
+  if (type === 'board-state') {
+    restoreBoardState(payload, { recordHistory: true });
+    return;
+  }
 
   if (type === 'presence' && payload?.user) {
     peers.set(payload.user.id, payload.user);
     renderPresence();
+  }
+
+  if (shouldRecordRemoteHistory) {
+    recordCurrentStateInHistory();
   }
 }
 
