@@ -3,6 +3,8 @@ const SYNC_RETRY_MS = 1500;
 const seenMessageIds = new Set();
 const seenMessageOrder = [];
 const SEEN_MESSAGE_LIMIT = 4000;
+let localMessageSeq = 0;
+const boardStateBarriers = new Map();
 const channel =
   typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(BROADCAST_CHANNEL_NAME) : null;
 
@@ -117,7 +119,7 @@ function isKnownMessage(id) {
 
 function normalizeInboundMessage(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const { id, type, source, payload, sentAt } = raw;
+  const { id, type, source, payload, sentAt, seq } = raw;
   if (!type || !source) return null;
   return {
     id: id || crypto.randomUUID(),
@@ -125,6 +127,7 @@ function normalizeInboundMessage(raw) {
     source,
     payload,
     sentAt: sentAt || Date.now(),
+    seq: Number.isFinite(Number(seq)) ? Number(seq) : null,
   };
 }
 
@@ -239,6 +242,7 @@ function sendStateToServer() {
     source: clientId,
     payload: snapshotBoardState(),
     sentAt: Date.now(),
+    seq: ++localMessageSeq,
   });
 }
 
@@ -628,9 +632,42 @@ function broadcast(type, payload = {}) {
     source: clientId,
     payload,
     sentAt: Date.now(),
+    seq: ++localMessageSeq,
   };
   rememberMessageId(message.id);
   emitRealtimeMessage(message);
+}
+
+function isBoardMutationMessage(type) {
+  return type !== 'presence';
+}
+
+function rememberBoardStateBarrier(message) {
+  if (!message?.source || message.source === 'server') return;
+  const current = boardStateBarriers.get(message.source);
+  const seq = Number.isFinite(Number(message.seq)) ? Number(message.seq) : null;
+  const sentAt = Number(message.sentAt || 0);
+  if (
+    !current ||
+    (seq !== null && (current.seq === null || seq > current.seq)) ||
+    (seq === null && current.seq === null && sentAt > current.sentAt) ||
+    (seq === null && current.seq !== null && sentAt > current.sentAt)
+  ) {
+    boardStateBarriers.set(message.source, { seq, sentAt });
+  }
+}
+
+function isOlderThanBoardStateBarrier(message) {
+  if (!message?.source || message.source === 'server') return false;
+  if (!isBoardMutationMessage(message.type)) return false;
+  const barrier = boardStateBarriers.get(message.source);
+  if (!barrier) return false;
+
+  const seq = Number.isFinite(Number(message.seq)) ? Number(message.seq) : null;
+  if (seq !== null && barrier.seq !== null) {
+    return seq < barrier.seq;
+  }
+  return Number(message.sentAt || 0) < barrier.sentAt;
 }
 
 function syncPresence() {
@@ -1396,6 +1433,12 @@ function restoreBoardState(state, { broadcastRestore = false, recordHistory = fa
   const compares = Array.isArray(state.compares) ? state.compares : [];
 
   isRestoringHistory = true;
+  liveStrokes.clear();
+  activeStroke = null;
+  isDrawing = false;
+  lastPoint = null;
+  lastEraserSyncPoint = null;
+  eraserPath = [];
   drawingOps = (state.drawingOps || []).map((stroke) => ({
     ...stroke,
     points: (stroke.points || []).map((point) => ({ ...point })),
@@ -2923,6 +2966,7 @@ function handleRealtimeMessage(message) {
 
   const { type, source, payload } = message;
   if (source === clientId) return;
+  if (isOlderThanBoardStateBarrier(message)) return;
   const isTransient = payload?.transient === true;
   let shouldRecordRemoteHistory = false;
 
@@ -3056,6 +3100,7 @@ function handleRealtimeMessage(message) {
     shouldRecordRemoteHistory = true;
   }
   if (type === 'board-state') {
+    rememberBoardStateBarrier(message);
     restoreBoardState(payload, { recordHistory: true });
     return;
   }
