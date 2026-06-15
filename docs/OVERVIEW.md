@@ -38,7 +38,7 @@ npm start
 | `package.json` | `start: node server.js`, `engines: node>=18`. 의존성 없음. |
 | `render.yaml` | Render 배포 블루프린트. |
 | `README.md` / `DEPLOY.md` | 소개 / 배포 가이드. |
-| `docs/` | 기획·문서 (`image-compare-plan.md`, 이 문서 `OVERVIEW.md`). |
+| `docs/` | 기획·문서: `OVERVIEW.md`(이 문서), `CONTRIBUTING.md`(작업 지침·모든 변경은 CHANGELOG에 기록), `CHANGELOG.md`(변경 이력), `realtime-collaboration-review.md`(기술 검토), `image-compare-plan.md`. |
 
 ---
 
