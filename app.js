@@ -29,7 +29,6 @@ const toolCursor = document.getElementById('toolCursor');
 const presence = document.getElementById('presence');
 const canvasMeta = document.getElementById('canvasMeta');
 const homeButton = document.getElementById('homeButton');
-const newCanvasButton = document.getElementById('newCanvasButton');
 const homeView = document.getElementById('homeView');
 const homeReturnButton = document.getElementById('homeReturnButton');
 const homeNewCanvasButton = document.getElementById('homeNewCanvasButton');
@@ -275,19 +274,75 @@ function deleteCanvas(canvasId, title) {
   renderRecentCanvases();
 }
 
-function renameCanvas() {
-  if (isHomeRoute()) return;
-  const currentTitle = canvasTitle(activeCanvasId);
-  const nextTitle = window.prompt('캔버스 이름을 입력하세요.', currentTitle);
-  if (nextTitle === null) return;
-  const trimmed = nextTitle.trim();
-  if (!trimmed || trimmed === currentTitle) return;
-  rememberCanvas(activeCanvasId, { title: trimmed });
-  if (canvasMeta) {
-    canvasMeta.textContent = trimmed;
-    canvasMeta.setAttribute('aria-label', `${trimmed} 이름 수정`);
-  }
+function updateCanvasMetaTitle() {
+  if (!canvasMeta) return;
+  const title = canvasTitle(activeCanvasId);
+  canvasMeta.textContent = title;
+  canvasMeta.title = '캔버스 이름 수정';
+  canvasMeta.setAttribute('aria-label', `${title} 이름 수정`);
+}
+
+function saveCanvasTitle(canvasId, title) {
+  const id = normalizeCanvasId(canvasId);
+  const trimmed = String(title || '').trim();
+  if (!trimmed) return false;
+  if (trimmed === canvasTitle(id)) return false;
+  rememberCanvas(id, { title: trimmed });
+  if (id === activeCanvasId) updateCanvasMetaTitle();
   renderRecentCanvases();
+  return true;
+}
+
+function beginInlineCanvasRename(host, canvasId) {
+  if (!host || host.dataset.editing === 'true') return;
+  const id = normalizeCanvasId(canvasId);
+  const currentTitle = canvasTitle(id);
+  let closed = false;
+  host.dataset.editing = 'true';
+  host.textContent = '';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'canvas-title-input';
+  input.value = currentTitle;
+  input.maxLength = 80;
+  input.setAttribute('aria-label', '캔버스 이름');
+  host.appendChild(input);
+
+  const finish = (save) => {
+    if (closed) return;
+    closed = true;
+    const nextTitle = input.value.trim();
+    delete host.dataset.editing;
+    host.textContent = nextTitle || currentTitle;
+    if (save && nextTitle) {
+      saveCanvasTitle(id, nextTitle);
+    }
+  };
+
+  input.addEventListener('click', (event) => event.stopPropagation());
+  input.addEventListener('pointerdown', (event) => event.stopPropagation());
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+}
+
+function renameActiveCanvasInline() {
+  if (isHomeRoute()) return;
+  beginInlineCanvasRename(canvasMeta, activeCanvasId);
 }
 
 function formatRecentTime(timestamp) {
@@ -550,30 +605,54 @@ function renderRecentCanvases() {
     card.className = isCurrent ? 'recent-canvas-item is-current' : 'recent-canvas-item';
     card.dataset.canvasId = id;
 
-    const openButton = document.createElement('button');
-    openButton.type = 'button';
-    openButton.className = 'recent-canvas-open';
-    if (isCurrent) openButton.setAttribute('aria-current', 'true');
+    const openArea = document.createElement('div');
+    openArea.className = 'recent-canvas-open';
+    openArea.setAttribute('role', 'button');
+    openArea.tabIndex = 0;
+    openArea.setAttribute('aria-label', `${item.title || fallbackCanvasTitle(id)} 열기`);
+    if (isCurrent) openArea.setAttribute('aria-current', 'true');
 
     const preview = createRecentCanvasPreview(item.preview);
+    openArea.append(preview);
 
     const label = document.createElement('strong');
     label.className = 'recent-canvas-title';
     label.textContent = item.title || fallbackCanvasTitle(id);
+    label.tabIndex = 0;
+    label.title = '이름 수정';
+    label.setAttribute('role', 'button');
+    label.setAttribute('aria-label', `${item.title || fallbackCanvasTitle(id)} 이름 수정`);
+    label.addEventListener('click', (event) => {
+      event.stopPropagation();
+      beginInlineCanvasRename(label, id);
+    });
+    label.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === 'F2') {
+        event.preventDefault();
+        event.stopPropagation();
+        beginInlineCanvasRename(label, id);
+      }
+    });
+
     const meta = document.createElement('span');
     meta.className = 'recent-canvas-meta';
     const when = formatRecentTime(item.updatedAt);
     meta.textContent = isCurrent ? `현재 열림 · ${when}` : `최근 열림 · ${when}`;
     meta.textContent += formatCanvasPreviewSummary(item.preview);
-    const action = document.createElement('span');
-    action.className = 'recent-canvas-action';
-    action.textContent = isCurrent ? '작업 중' : '열기';
 
     const text = document.createElement('div');
     text.className = 'recent-canvas-main';
     text.append(label, meta);
-    openButton.append(preview, text, action);
-    openButton.addEventListener('click', () => {
+    openArea.addEventListener('click', () => {
+      if (isCurrent) {
+        closeHome();
+      } else {
+        window.location.href = canvasUrl(id);
+      }
+    });
+    openArea.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
       if (isCurrent) {
         closeHome();
       } else {
@@ -590,7 +669,7 @@ function renderRecentCanvases() {
       deleteCanvas(id, item.title || fallbackCanvasTitle(id));
     });
 
-    card.append(openButton, deleteButton);
+    card.append(openArea, text, deleteButton);
     recentCanvasList.appendChild(card);
   });
 }
@@ -625,16 +704,16 @@ function initializeCanvasHome() {
   document.body.classList.toggle('is-home-route', homeRoute);
   document.body.classList.toggle('is-editor-route', !homeRoute);
 
-  if (canvasMeta) {
-    canvasMeta.textContent = canvasTitle(activeCanvasId);
-    canvasMeta.title = '캔버스 이름 수정';
-    canvasMeta.setAttribute('aria-label', `${canvasTitle(activeCanvasId)} 이름 수정`);
-  }
+  updateCanvasMetaTitle();
   if (!homeRoute) rememberCanvas(activeCanvasId);
   renderRecentCanvases();
-  canvasMeta?.addEventListener('click', renameCanvas);
+  canvasMeta?.addEventListener('click', renameActiveCanvasInline);
+  canvasMeta?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== 'F2') return;
+    event.preventDefault();
+    renameActiveCanvasInline();
+  });
   homeButton?.addEventListener('click', goHome);
-  newCanvasButton?.addEventListener('click', createNewCanvas);
   homeReturnButton?.addEventListener('click', closeHome);
   homeNewCanvasButton?.addEventListener('click', createNewCanvas);
   homeView?.addEventListener('click', (event) => {

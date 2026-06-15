@@ -294,9 +294,6 @@ body.is-home-route .home-return-button {
 
 .recent-canvas-item {
   position: relative;
-}
-
-.recent-canvas-open {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
@@ -308,17 +305,30 @@ body.is-home-route .home-return-button {
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
+}
+
+.recent-canvas-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
   cursor: pointer;
 }
 
-.recent-canvas-item.is-current .recent-canvas-open {
+.recent-canvas-item.is-current {
   border-color: rgba(59, 130, 246, 0.55);
   background: rgba(59, 130, 246, 0.12);
 }
 
-.recent-canvas-open:hover {
+.recent-canvas-item:hover {
   border-color: var(--border-strong);
   background: var(--bg-surface-2);
+}
+
+.recent-canvas-open:hover .recent-canvas-preview {
+  border-color: var(--border-strong);
 }
 
 .recent-canvas-main {
@@ -385,6 +395,27 @@ body.is-home-route .home-return-button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
+}
+
+.recent-canvas-title:hover {
+  color: var(--text-primary);
+}
+
+.canvas-title-input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-weight: inherit;
+}
+
+.canvas-meta .canvas-title-input {
+  width: min(220px, 42vw);
+  height: 22px;
+  color: var(--text-primary);
 }
 
 .recent-canvas-meta {
@@ -395,22 +426,6 @@ body.is-home-route .home-return-button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.recent-canvas-action {
-  position: absolute;
-  top: var(--space-3);
-  left: var(--space-3);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 590;
-  white-space: nowrap;
-  padding: 3px 8px;
-  border: 1px solid rgba(15, 23, 42, 0.12);
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.82);
-  color: #111827;
-  backdrop-filter: blur(6px);
 }
 
 .recent-canvas-delete {
