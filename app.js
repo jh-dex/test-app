@@ -38,6 +38,7 @@ const colorPicker = document.getElementById('colorPicker');
 const colorButton = document.getElementById('colorButton');
 const colorSwatch = document.getElementById('colorSwatch');
 const brushSize = document.getElementById('brushSize');
+const brushSizeValue = document.getElementById('brushSizeValue');
 const textSizeInput = document.getElementById('textSize');
 const textSizeValue = document.getElementById('textSizeValue');
 const textColorPicker = document.getElementById('textColorPicker');
@@ -904,6 +905,14 @@ function eventToWorld(event) {
   };
 }
 
+function viewportCenterWorld() {
+  const rect = board.getBoundingClientRect();
+  return {
+    x: (rect.width / 2 - camera.x) / camera.zoom,
+    y: (rect.height / 2 - camera.y) / camera.zoom,
+  };
+}
+
 function isTypingTarget(target) {
   if (!target) return false;
   const tag = target.tagName;
@@ -1345,8 +1354,13 @@ function renderPresence() {
     .forEach((user) => {
       const el = document.createElement('span');
       el.className = 'badge';
-      el.style.borderColor = user.color;
-      el.textContent = user.id === me.id ? `${user.name} (me)` : user.name;
+      const dot = document.createElement('span');
+      dot.className = 'badge-dot';
+      dot.style.background = user.color;
+      el.appendChild(dot);
+      const label = document.createElement('span');
+      label.textContent = user.id === me.id ? `${user.name} (me)` : user.name;
+      el.appendChild(label);
       presence.appendChild(el);
     });
 }
@@ -3506,6 +3520,7 @@ colorPicker.addEventListener('change', () => {
 });
 
 brushSize.addEventListener('input', () => {
+  if (brushSizeValue) brushSizeValue.textContent = String(brushSize.value);
   updateToolCursorSize();
 });
 
@@ -3570,7 +3585,13 @@ toolButtons.forEach((btn) => {
 imageInput.addEventListener('change', (event) => {
   const files = [...(event.target.files || [])];
   if (!files.length) return;
-  files.forEach((file, index) => importImageFile(file, { x: 30 + index * 26, y: 30 + index * 26 }));
+  const center = viewportCenterWorld();
+  files.forEach((file, index) => {
+    importImageFile(file, {
+      x: center.x - 110 + index * 24,
+      y: center.y - 70 + index * 24,
+    });
+  });
   event.target.value = '';
 });
 
@@ -3643,11 +3664,7 @@ window.addEventListener('paste', (event) => {
   if (!files.length) return;
 
   event.preventDefault();
-  const rect = board.getBoundingClientRect();
-  const centerWorld = {
-    x: (rect.width / 2 - camera.x) / camera.zoom,
-    y: (rect.height / 2 - camera.y) / camera.zoom,
-  };
+  const centerWorld = viewportCenterWorld();
 
   files.forEach((file, index) => {
     importImageFile(file, {
