@@ -18,15 +18,42 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-const clients = new Set();
+const DEFAULT_CANVAS_ID = 'default';
+const clientsByCanvas = new Map();
+const snapshotsByCanvas = new Map();
 
-// Authoritative board state for late-joiner sync.
+// Authoritative board state for late-joiner sync, scoped per canvas.
 // Clients push a full snapshot ('state-store') after each committed change;
 // the server keeps only the latest one and replays it to anyone who connects.
-let boardSnapshot = null;
+function normalizeCanvasId(value) {
+  const id = String(value || '').trim().toLowerCase();
+  if (!id) return DEFAULT_CANVAS_ID;
+  return /^[a-z0-9_-]{1,80}$/.test(id) ? id : DEFAULT_CANVAS_ID;
+}
 
-function dropClient(res) {
-  clients.delete(res);
+function getRequestCanvasId(req) {
+  try {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    return normalizeCanvasId(url.searchParams.get('canvas'));
+  } catch {
+    return DEFAULT_CANVAS_ID;
+  }
+}
+
+function getCanvasClients(canvasId) {
+  const id = normalizeCanvasId(canvasId);
+  if (!clientsByCanvas.has(id)) {
+    clientsByCanvas.set(id, new Set());
+  }
+  return clientsByCanvas.get(id);
+}
+
+function dropClient(canvasId, res) {
+  const clients = clientsByCanvas.get(normalizeCanvasId(canvasId));
+  if (clients) {
+    clients.delete(res);
+    if (clients.size === 0) clientsByCanvas.delete(normalizeCanvasId(canvasId));
+  }
   try {
     res.end();
   } catch {
@@ -34,7 +61,7 @@ function dropClient(res) {
   }
 }
 
-function sendSse(res, payload) {
+function sendSse(canvasId, res, payload) {
   // Guard every write: a dead/half-open connection would otherwise throw and
   // abort the broadcast loop, so clients later in the set silently miss the
   // message (causes "some windows update, some don't"). Prune on failure.
@@ -42,24 +69,26 @@ function sendSse(res, payload) {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
     return true;
   } catch {
-    dropClient(res);
+    dropClient(canvasId, res);
     return false;
   }
 }
 
-function broadcast(payload, exclude) {
+function broadcast(canvasId, payload, exclude) {
+  const clients = clientsByCanvas.get(normalizeCanvasId(canvasId));
+  if (!clients) return;
   for (const client of [...clients]) {
     if (client === exclude) continue;
-    sendSse(client, payload);
+    sendSse(canvasId, client, payload);
   }
 }
 
-function snapshotMessage() {
+function snapshotMessage(canvasId) {
   return {
     id: `srv-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type: 'board-state',
     source: 'server',
-    payload: boardSnapshot,
+    payload: snapshotsByCanvas.get(normalizeCanvasId(canvasId)) || null,
     sentAt: Date.now(),
   };
 }
@@ -75,6 +104,7 @@ function safeFilePath(urlPath) {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/events')) {
+    const canvasId = getRequestCanvasId(req);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
@@ -82,21 +112,22 @@ const server = http.createServer((req, res) => {
       'Access-Control-Allow-Origin': '*',
     });
     res.write(': connected\n\n');
+    const clients = getCanvasClients(canvasId);
     clients.add(res);
 
     // Replay current board to the freshly connected client only.
-    if (boardSnapshot) {
-      sendSse(res, snapshotMessage());
+    if (snapshotsByCanvas.has(canvasId)) {
+      sendSse(canvasId, res, snapshotMessage(canvasId));
     }
 
     req.on('close', () => {
-      clients.delete(res);
-      res.end();
+      dropClient(canvasId, res);
     });
     return;
   }
 
   if (req.method === 'POST' && req.url?.startsWith('/sync')) {
+    const canvasId = getRequestCanvasId(req);
     let body = '';
     req.on('data', (chunk) => {
       body += chunk;
@@ -115,9 +146,13 @@ const server = http.createServer((req, res) => {
           if (!msg) continue;
           // State snapshots are stored, not relayed (avoids flicker on peers).
           if (msg.type === 'state-store') {
-            boardSnapshot = msg.payload || null;
+            if (msg.payload) {
+              snapshotsByCanvas.set(canvasId, msg.payload);
+            } else {
+              snapshotsByCanvas.delete(canvasId);
+            }
           } else {
-            broadcast(msg);
+            broadcast(canvasId, msg);
           }
         }
 
@@ -162,11 +197,13 @@ const server = http.createServer((req, res) => {
 });
 
 setInterval(() => {
-  for (const client of [...clients]) {
-    try {
-      client.write(': ping\n\n');
-    } catch {
-      dropClient(client);
+  for (const [canvasId, clients] of [...clientsByCanvas]) {
+    for (const client of [...clients]) {
+      try {
+        client.write(': ping\n\n');
+      } catch {
+        dropClient(canvasId, client);
+      }
     }
   }
 }, 20000);

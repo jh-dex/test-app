@@ -1,4 +1,7 @@
-const BROADCAST_CHANNEL_NAME = 'live-board-mvp';
+const DEFAULT_CANVAS_ID = 'default';
+const RECENT_CANVASES_KEY = 'live-board-recent-canvases';
+const activeCanvasId = resolveCanvasId();
+const BROADCAST_CHANNEL_NAME = `live-board-mvp:${activeCanvasId}`;
 const SYNC_RETRY_MS = 1500;
 const seenMessageIds = new Set();
 const seenMessageOrder = [];
@@ -22,6 +25,13 @@ const textLayer = document.getElementById('textLayer');
 const zoomBadge = document.getElementById('zoomBadge');
 const toolCursor = document.getElementById('toolCursor');
 const presence = document.getElementById('presence');
+const canvasMeta = document.getElementById('canvasMeta');
+const homeButton = document.getElementById('homeButton');
+const newCanvasButton = document.getElementById('newCanvasButton');
+const homeView = document.getElementById('homeView');
+const homeReturnButton = document.getElementById('homeReturnButton');
+const homeNewCanvasButton = document.getElementById('homeNewCanvasButton');
+const recentCanvasList = document.getElementById('recentCanvasList');
 const displayNameInput = document.getElementById('displayName');
 const colorPicker = document.getElementById('colorPicker');
 const colorButton = document.getElementById('colorButton');
@@ -92,6 +102,60 @@ const syncState = {
   timer: null,
 };
 
+function normalizeCanvasId(value) {
+  const id = String(value || '').trim().toLowerCase();
+  if (!id) return DEFAULT_CANVAS_ID;
+  return /^[a-z0-9_-]{1,80}$/.test(id) ? id : DEFAULT_CANVAS_ID;
+}
+
+function resolveCanvasId() {
+  const params = new URLSearchParams(window.location.search);
+  return normalizeCanvasId(params.get('canvas'));
+}
+
+function hasExplicitCanvasParam() {
+  return new URLSearchParams(window.location.search).has('canvas');
+}
+
+function isHomeRoute() {
+  return !hasExplicitCanvasParam();
+}
+
+function fallbackCanvasTitle(canvasId) {
+  return canvasId === DEFAULT_CANVAS_ID ? '기본 캔버스' : `캔버스 ${canvasId}`;
+}
+
+function canvasTitle(canvasId) {
+  const id = normalizeCanvasId(canvasId);
+  const existing = loadRecentCanvases().find((item) => normalizeCanvasId(item.id) === id);
+  return existing?.title || fallbackCanvasTitle(id);
+}
+
+function generateCanvasId() {
+  return `canvas-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function generateCanvasTitle() {
+  return `새 캔버스 ${new Date().toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`;
+}
+
+function canvasUrl(canvasId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('canvas', normalizeCanvasId(canvasId));
+  return url.toString();
+}
+
+function homeUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('canvas');
+  return url.toString();
+}
+
 function resolveSyncBaseUrl() {
   const param = new URLSearchParams(window.location.search).get('sync');
   if (param) {
@@ -106,6 +170,177 @@ function resolveSyncBaseUrl() {
     return window.location.origin;
   }
   return null;
+}
+
+function syncEndpoint(pathname) {
+  const baseUrl = resolveSyncBaseUrl();
+  if (!baseUrl) return null;
+  return `${baseUrl}${pathname}?canvas=${encodeURIComponent(activeCanvasId)}`;
+}
+
+function loadRecentCanvases() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENT_CANVASES_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set();
+    return parsed
+      .filter((item) => item && item.id)
+      .map((item) => {
+        const id = normalizeCanvasId(item.id);
+        return {
+          id,
+          title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : fallbackCanvasTitle(id),
+          createdAt: Number(item.createdAt) || Number(item.updatedAt) || Date.now(),
+          updatedAt: Number(item.updatedAt) || Number(item.createdAt) || Date.now(),
+        };
+      })
+      .filter((item) => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentCanvases(items) {
+  try {
+    localStorage.setItem(RECENT_CANVASES_KEY, JSON.stringify(items.slice(0, 20)));
+  } catch {
+    // localStorage can be unavailable in private/file contexts.
+  }
+}
+
+function rememberCanvas(canvasId, updates = {}) {
+  const id = normalizeCanvasId(canvasId);
+  const now = Date.now();
+  const items = loadRecentCanvases();
+  const existing = items.find((item) => item.id === id);
+  const rest = items.filter((item) => item.id !== id);
+  saveRecentCanvases([
+    {
+      id,
+      title: updates.title || existing?.title || fallbackCanvasTitle(id),
+      createdAt: updates.createdAt || existing?.createdAt || now,
+      updatedAt: now,
+    },
+    ...rest,
+  ]);
+}
+
+function formatRecentTime(timestamp) {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function renderRecentCanvases() {
+  if (!recentCanvasList) return;
+  const items = loadRecentCanvases();
+  const hasOpenCanvas = !isHomeRoute();
+  recentCanvasList.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'recent-canvas-empty';
+    const title = document.createElement('strong');
+    title.textContent = '아직 캔버스가 없습니다.';
+    const copy = document.createElement('span');
+    copy.textContent = '새 파일을 눌러 첫 캔버스를 만들 수 있습니다.';
+    empty.append(title, copy);
+    recentCanvasList.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const id = normalizeCanvasId(item.id);
+    const isCurrent = hasOpenCanvas && id === activeCanvasId;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = isCurrent ? 'recent-canvas-item is-current' : 'recent-canvas-item';
+    button.dataset.canvasId = id;
+    if (isCurrent) button.setAttribute('aria-current', 'true');
+
+    const icon = document.createElement('span');
+    icon.className = 'recent-canvas-icon';
+    icon.setAttribute('aria-hidden', 'true');
+
+    const label = document.createElement('strong');
+    label.className = 'recent-canvas-title';
+    label.textContent = item.title || fallbackCanvasTitle(id);
+    const meta = document.createElement('span');
+    meta.className = 'recent-canvas-meta';
+    const when = formatRecentTime(item.updatedAt);
+    meta.textContent = isCurrent ? `현재 열림 · ${when}` : `최근 열림 · ${when}`;
+    const action = document.createElement('span');
+    action.className = 'recent-canvas-action';
+    action.textContent = isCurrent ? '작업 중' : '열기';
+
+    const text = document.createElement('div');
+    text.className = 'recent-canvas-main';
+    text.append(label, meta);
+    button.append(icon, text, action);
+    button.addEventListener('click', () => {
+      if (isCurrent) {
+        closeHome();
+      } else {
+        window.location.href = canvasUrl(id);
+      }
+    });
+    recentCanvasList.appendChild(button);
+  });
+}
+
+function openHome() {
+  if (!homeView) return;
+  renderRecentCanvases();
+  homeView.classList.remove('is-hidden');
+}
+
+function closeHome() {
+  if (!homeView) return;
+  homeView.classList.add('is-hidden');
+}
+
+function isHomeOpen() {
+  return Boolean(homeView && !homeView.classList.contains('is-hidden'));
+}
+
+function createNewCanvas() {
+  const id = generateCanvasId();
+  rememberCanvas(id, { title: generateCanvasTitle(), createdAt: Date.now() });
+  window.location.href = canvasUrl(id);
+}
+
+function goHome() {
+  window.location.href = homeUrl();
+}
+
+function initializeCanvasHome() {
+  const homeRoute = isHomeRoute();
+  document.body.classList.toggle('is-home-route', homeRoute);
+  document.body.classList.toggle('is-editor-route', !homeRoute);
+
+  if (canvasMeta) {
+    canvasMeta.textContent = canvasTitle(activeCanvasId);
+    canvasMeta.title = '홈으로 이동';
+    canvasMeta.setAttribute('aria-label', `${canvasTitle(activeCanvasId)}에서 홈으로 이동`);
+  }
+  if (!homeRoute) rememberCanvas(activeCanvasId);
+  renderRecentCanvases();
+  canvasMeta?.addEventListener('click', goHome);
+  homeButton?.addEventListener('click', goHome);
+  newCanvasButton?.addEventListener('click', createNewCanvas);
+  homeReturnButton?.addEventListener('click', closeHome);
+  homeNewCanvasButton?.addEventListener('click', createNewCanvas);
+  homeView?.addEventListener('click', (event) => {
+    if (!homeRoute && event.target === homeView) closeHome();
+  });
+  if (homeRoute) openHome();
+  else closeHome();
 }
 
 function rememberMessageId(id) {
@@ -137,10 +372,10 @@ function normalizeInboundMessage(raw) {
 }
 
 function connectSyncStream() {
-  const baseUrl = resolveSyncBaseUrl();
-  if (!baseUrl) return;
+  const endpoint = syncEndpoint('/events');
+  if (!endpoint) return;
 
-  const source = new EventSource(`${baseUrl}/events`);
+  const source = new EventSource(endpoint);
   syncState.source = source;
 
   source.addEventListener('open', () => {
@@ -185,14 +420,14 @@ let flushScheduled = false;
 function flushOutbound() {
   flushScheduled = false;
   if (!outboundQueue.length) return;
-  const baseUrl = resolveSyncBaseUrl();
-  if (!baseUrl) {
+  const endpoint = syncEndpoint('/sync');
+  if (!endpoint) {
     outboundQueue = [];
     return;
   }
   const batch = outboundQueue;
   outboundQueue = [];
-  fetch(`${baseUrl}/sync`, {
+  fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ batch }),
@@ -219,8 +454,7 @@ function scheduleFlush() {
 }
 
 function queueForServer(message) {
-  const baseUrl = resolveSyncBaseUrl();
-  if (!baseUrl) return;
+  if (!syncEndpoint('/sync')) return;
   outboundQueue.push(message);
   scheduleFlush();
 }
@@ -1608,6 +1842,7 @@ function pushHistory(reason = '') {
   // Skip the startup 'initial' push so an empty board never clobbers
   // content that another client has already stored on the server.
   if (reason !== 'initial') {
+    rememberCanvas(activeCanvasId);
     scheduleStateSync();
   }
 }
@@ -3068,6 +3303,10 @@ if (makeCompareBtn) {
 }
 
 window.addEventListener('keydown', (event) => {
+  if (isHomeOpen()) {
+    if (event.key === 'Escape') closeHome();
+    return;
+  }
   if (isTypingTarget(event.target)) return;
   if (event.key === 'Delete' || event.key === 'Backspace') {
     if (selectedIds.size === 0) return;
@@ -3259,16 +3498,19 @@ if (channel) {
   };
 }
 
-connectSyncStream();
+initializeCanvasHome();
 
-setTool('pen');
-syncPresence();
-renderPresence();
-pushHistory('initial');
-setInterval(() => {
+if (!isHomeRoute()) {
+  connectSyncStream();
+  setTool('pen');
   syncPresence();
   renderPresence();
-}, 5000);
+  pushHistory('initial');
+  setInterval(() => {
+    syncPresence();
+    renderPresence();
+  }, 5000);
+}
 
 window.addEventListener('blur', () => {
   isSpacePressed = false;

@@ -16,8 +16,30 @@
         <h1>Live Board</h1>
         <p>여러 명이 동시에 그림·텍스트·이미지를 올리는 실시간 협업 화이트보드</p>
       </div>
-      <div class="presence" id="presence"></div>
+      <div class="topbar-actions">
+        <button id="canvasMeta" type="button" class="canvas-meta">기본 캔버스</button>
+        <button id="homeButton" type="button" class="topbar-button">홈</button>
+        <button id="newCanvasButton" type="button" class="topbar-button primary">새 파일</button>
+        <div class="presence" id="presence"></div>
+      </div>
     </header>
+
+    <section id="homeView" class="home-view is-hidden" aria-label="캔버스 홈">
+      <div class="home-panel">
+        <div class="home-head">
+          <div>
+            <h2>캔버스</h2>
+            <p>작업을 시작할 캔버스를 고르거나 새 캔버스를 만듭니다.</p>
+          </div>
+          <div class="home-actions">
+            <button id="homeReturnButton" type="button" class="home-return-button">현재 작업으로 돌아가기</button>
+            <button id="homeNewCanvasButton" type="button" class="primary">새 파일</button>
+          </div>
+        </div>
+        <div class="home-section-head">최근 캔버스</div>
+        <div id="recentCanvasList" class="recent-canvas-list"></div>
+      </div>
+    </section>
 
     <main class="layout">
       <aside class="panel">
