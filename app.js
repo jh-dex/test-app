@@ -1,5 +1,7 @@
 const DEFAULT_CANVAS_ID = 'default';
 const RECENT_CANVASES_KEY = 'live-board-recent-canvases';
+const CANVAS_PREVIEW_SIZE = 100;
+const CANVAS_PREVIEW_ITEM_LIMIT = 18;
 const activeCanvasId = resolveCanvasId();
 const BROADCAST_CHANNEL_NAME = `live-board-mvp:${activeCanvasId}`;
 const SYNC_RETRY_MS = 1500;
@@ -192,6 +194,7 @@ function loadRecentCanvases() {
           title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : fallbackCanvasTitle(id),
           createdAt: Number(item.createdAt) || Number(item.updatedAt) || Date.now(),
           updatedAt: Number(item.updatedAt) || Number(item.createdAt) || Date.now(),
+          preview: normalizeCanvasPreview(item.preview),
         };
       })
       .filter((item) => {
@@ -224,6 +227,7 @@ function rememberCanvas(canvasId, updates = {}) {
       title: updates.title || existing?.title || fallbackCanvasTitle(id),
       createdAt: updates.createdAt || existing?.createdAt || now,
       updatedAt: now,
+      preview: updates.preview !== undefined ? updates.preview : existing?.preview || null,
     },
     ...rest,
   ]);
@@ -237,6 +241,233 @@ function formatRecentTime(timestamp) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function clampPreviewValue(value, fallback = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(CANVAS_PREVIEW_SIZE, Math.max(0, number));
+}
+
+function normalizePreviewColor(color) {
+  const value = typeof color === 'string' ? color.trim() : '';
+  if (/^#[0-9a-f]{3,8}$/i.test(value)) return value;
+  if (/^rgba?\([\d\s.,%]+\)$/i.test(value)) return value;
+  if (/^hsla?\([\d\s.,%]+\)$/i.test(value)) return value;
+  return '#2563eb';
+}
+
+function normalizePreviewItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const type = ['stroke', 'image', 'text', 'compare'].includes(item.type) ? item.type : null;
+  if (!type) return null;
+
+  if (type === 'stroke') {
+    const points = Array.isArray(item.points)
+      ? item.points
+          .slice(0, 12)
+          .map((point) => ({ x: clampPreviewValue(point?.x), y: clampPreviewValue(point?.y) }))
+      : [];
+    if (points.length < 2) return null;
+    return {
+      type,
+      color: normalizePreviewColor(item.color),
+      size: Math.min(7, Math.max(1.5, Number(item.size) || 2.5)),
+      points,
+    };
+  }
+
+  return {
+    type,
+    x: clampPreviewValue(item.x),
+    y: clampPreviewValue(item.y),
+    width: Math.max(3, clampPreviewValue(item.width, 20)),
+    height: Math.max(3, clampPreviewValue(item.height, 14)),
+  };
+}
+
+function normalizeCanvasPreview(preview) {
+  if (!preview || typeof preview !== 'object') return null;
+  const counts = {
+    strokes: Math.max(0, Number(preview.counts?.strokes) || 0),
+    images: Math.max(0, Number(preview.counts?.images) || 0),
+    texts: Math.max(0, Number(preview.counts?.texts) || 0),
+    compares: Math.max(0, Number(preview.counts?.compares) || 0),
+  };
+  const items = Array.isArray(preview.items)
+    ? preview.items.slice(0, CANVAS_PREVIEW_ITEM_LIMIT).map(normalizePreviewItem).filter(Boolean)
+    : [];
+  if (!items.length && counts.strokes + counts.images + counts.texts + counts.compares === 0) return null;
+  return { counts, items };
+}
+
+function createCanvasPreview(snapshot) {
+  if (!snapshot) return null;
+  const rawItems = [];
+  const bounds = {
+    minX: Infinity,
+    minY: Infinity,
+    maxX: -Infinity,
+    maxY: -Infinity,
+  };
+  const includeBounds = (x, y, width = 0, height = 0) => {
+    const x1 = Number(x);
+    const y1 = Number(y);
+    const x2 = x1 + Number(width || 0);
+    const y2 = y1 + Number(height || 0);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return;
+    bounds.minX = Math.min(bounds.minX, x1, x2);
+    bounds.minY = Math.min(bounds.minY, y1, y2);
+    bounds.maxX = Math.max(bounds.maxX, x1, x2);
+    bounds.maxY = Math.max(bounds.maxY, y1, y2);
+  };
+
+  (snapshot.drawingOps || []).forEach((stroke) => {
+    const points = (stroke.points || []).filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+    if (points.length < 2) return;
+    points.forEach((point) => includeBounds(point.x, point.y));
+    rawItems.push({
+      type: 'stroke',
+      color: normalizePreviewColor(stroke.color),
+      size: Math.min(7, Math.max(1.5, Number(stroke.size) / 2 || 2.5)),
+      points,
+    });
+  });
+
+  (snapshot.images || []).forEach((image) => {
+    const width = Number(image.width) || 220;
+    const height = Number(image.height) || Math.max(120, width * 0.68);
+    includeBounds(image.x, image.y, width, height);
+    rawItems.push({ type: 'image', x: image.x, y: image.y, width, height });
+  });
+
+  (snapshot.compares || []).forEach((compare) => {
+    const width = Number(compare.width) || 220;
+    const height = Number(compare.height) || 160;
+    includeBounds(compare.x, compare.y, width, height);
+    rawItems.push({ type: 'compare', x: compare.x, y: compare.y, width, height });
+  });
+
+  (snapshot.texts || []).forEach((text) => {
+    const size = Number(text.size) || DEFAULT_TEXT_SIZE;
+    const textLength = String(text.text || '').length;
+    const width = Number(text.width) || Math.min(420, Math.max(80, textLength * size * 0.45));
+    const height = Number(text.minHeight) || size * 1.55;
+    includeBounds(text.x, text.y, width, height);
+    rawItems.push({ type: 'text', x: text.x, y: text.y, width, height });
+  });
+
+  if (!Number.isFinite(bounds.minX) || !rawItems.length) return null;
+
+  const width = Math.max(1, bounds.maxX - bounds.minX);
+  const height = Math.max(1, bounds.maxY - bounds.minY);
+  const padding = Math.max(width, height) * 0.14;
+  const frame = {
+    minX: bounds.minX - padding,
+    minY: bounds.minY - padding,
+    width: width + padding * 2,
+    height: height + padding * 2,
+  };
+  const toPreviewX = (x) => ((Number(x) - frame.minX) / frame.width) * CANVAS_PREVIEW_SIZE;
+  const toPreviewY = (y) => ((Number(y) - frame.minY) / frame.height) * CANVAS_PREVIEW_SIZE;
+  const toPreviewW = (value) => (Number(value || 0) / frame.width) * CANVAS_PREVIEW_SIZE;
+  const toPreviewH = (value) => (Number(value || 0) / frame.height) * CANVAS_PREVIEW_SIZE;
+  const samplePoints = (points) => {
+    const step = Math.max(1, Math.ceil(points.length / 10));
+    const sampled = points.filter((_point, index) => index % step === 0);
+    const last = points[points.length - 1];
+    if (sampled[sampled.length - 1] !== last) sampled.push(last);
+    return sampled.map((point) => ({
+      x: Math.round(toPreviewX(point.x) * 10) / 10,
+      y: Math.round(toPreviewY(point.y) * 10) / 10,
+    }));
+  };
+
+  const items = rawItems.slice(-CANVAS_PREVIEW_ITEM_LIMIT).map((item) => {
+    if (item.type === 'stroke') {
+      return {
+        type: 'stroke',
+        color: item.color,
+        size: item.size,
+        points: samplePoints(item.points),
+      };
+    }
+    return {
+      type: item.type,
+      x: Math.round(toPreviewX(item.x) * 10) / 10,
+      y: Math.round(toPreviewY(item.y) * 10) / 10,
+      width: Math.round(toPreviewW(item.width) * 10) / 10,
+      height: Math.round(toPreviewH(item.height) * 10) / 10,
+    };
+  });
+
+  return normalizeCanvasPreview({
+    counts: {
+      strokes: (snapshot.drawingOps || []).length,
+      images: (snapshot.images || []).length,
+      texts: (snapshot.texts || []).length,
+      compares: (snapshot.compares || []).length,
+    },
+    items,
+  });
+}
+
+function createSvgElement(tagName) {
+  return document.createElementNS('http://www.w3.org/2000/svg', tagName);
+}
+
+function createRecentCanvasPreview(preview) {
+  const frame = document.createElement('span');
+  frame.className = preview ? 'recent-canvas-preview' : 'recent-canvas-preview is-empty';
+  frame.setAttribute('aria-hidden', 'true');
+  if (!preview) return frame;
+
+  const svg = createSvgElement('svg');
+  svg.setAttribute('viewBox', `0 0 ${CANVAS_PREVIEW_SIZE} ${CANVAS_PREVIEW_SIZE}`);
+  svg.setAttribute('focusable', 'false');
+  preview.items.forEach((item) => {
+    if (item.type === 'stroke') {
+      const path = createSvgElement('path');
+      path.setAttribute(
+        'd',
+        item.points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' '),
+      );
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', item.color);
+      path.setAttribute('stroke-width', String(item.size));
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-linejoin', 'round');
+      svg.appendChild(path);
+      return;
+    }
+
+    const rect = createSvgElement('rect');
+    rect.setAttribute('class', `preview-shape preview-${item.type}`);
+    rect.setAttribute('x', String(item.x));
+    rect.setAttribute('y', String(item.y));
+    rect.setAttribute('width', String(item.width));
+    rect.setAttribute('height', String(item.height));
+    rect.setAttribute('rx', '3');
+    svg.appendChild(rect);
+
+    if (item.type === 'compare') {
+      const divider = createSvgElement('line');
+      divider.setAttribute('class', 'preview-detail');
+      divider.setAttribute('x1', String(item.x + item.width / 2));
+      divider.setAttribute('x2', String(item.x + item.width / 2));
+      divider.setAttribute('y1', String(item.y));
+      divider.setAttribute('y2', String(item.y + item.height));
+      svg.appendChild(divider);
+    }
+  });
+  frame.appendChild(svg);
+  return frame;
+}
+
+function formatCanvasPreviewSummary(preview) {
+  if (!preview) return '';
+  const total = preview.counts.strokes + preview.counts.images + preview.counts.texts + preview.counts.compares;
+  return total ? ` · ${total}개 요소` : '';
 }
 
 function renderRecentCanvases() {
@@ -264,9 +495,7 @@ function renderRecentCanvases() {
     button.dataset.canvasId = id;
     if (isCurrent) button.setAttribute('aria-current', 'true');
 
-    const icon = document.createElement('span');
-    icon.className = 'recent-canvas-icon';
-    icon.setAttribute('aria-hidden', 'true');
+    const preview = createRecentCanvasPreview(item.preview);
 
     const label = document.createElement('strong');
     label.className = 'recent-canvas-title';
@@ -275,6 +504,7 @@ function renderRecentCanvases() {
     meta.className = 'recent-canvas-meta';
     const when = formatRecentTime(item.updatedAt);
     meta.textContent = isCurrent ? `현재 열림 · ${when}` : `최근 열림 · ${when}`;
+    meta.textContent += formatCanvasPreviewSummary(item.preview);
     const action = document.createElement('span');
     action.className = 'recent-canvas-action';
     action.textContent = isCurrent ? '작업 중' : '열기';
@@ -282,7 +512,7 @@ function renderRecentCanvases() {
     const text = document.createElement('div');
     text.className = 'recent-canvas-main';
     text.append(label, meta);
-    button.append(icon, text, action);
+    button.append(preview, text, action);
     button.addEventListener('click', () => {
       if (isCurrent) {
         closeHome();
@@ -1698,7 +1928,10 @@ function appendHistorySnapshot(snapshot) {
 }
 
 function recordCurrentStateInHistory() {
-  appendHistorySnapshot(snapshotBoardState());
+  const snapshot = snapshotBoardState();
+  if (appendHistorySnapshot(snapshot)) {
+    rememberCanvas(activeCanvasId, { preview: createCanvasPreview(snapshot) });
+  }
 }
 
 // Undo/redo broadcasts only what actually changed (a diff against the live
@@ -1820,6 +2053,7 @@ function restoreBoardState(state, { broadcastRestore = false, recordHistory = fa
   } else {
     historyFingerprint = restoredSnapshot.fingerprint;
   }
+  rememberCanvas(activeCanvasId, { preview: createCanvasPreview(restoredSnapshot) });
 
   if (broadcastRestore) {
     // Live peers get only the objects this undo/redo changed (so their own
@@ -1842,7 +2076,7 @@ function pushHistory(reason = '') {
   // Skip the startup 'initial' push so an empty board never clobbers
   // content that another client has already stored on the server.
   if (reason !== 'initial') {
-    rememberCanvas(activeCanvasId);
+    rememberCanvas(activeCanvasId, { preview: createCanvasPreview(snapshot) });
     scheduleStateSync();
   }
 }
