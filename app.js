@@ -175,9 +175,13 @@ function resolveSyncBaseUrl() {
 }
 
 function syncEndpoint(pathname) {
+  return syncEndpointForCanvas(pathname, activeCanvasId);
+}
+
+function syncEndpointForCanvas(pathname, canvasId) {
   const baseUrl = resolveSyncBaseUrl();
   if (!baseUrl) return null;
-  return `${baseUrl}${pathname}?canvas=${encodeURIComponent(activeCanvasId)}`;
+  return `${baseUrl}${pathname}?canvas=${encodeURIComponent(normalizeCanvasId(canvasId))}`;
 }
 
 function loadRecentCanvases() {
@@ -231,6 +235,59 @@ function rememberCanvas(canvasId, updates = {}) {
     },
     ...rest,
   ]);
+}
+
+function forgetCanvas(canvasId) {
+  const id = normalizeCanvasId(canvasId);
+  saveRecentCanvases(loadRecentCanvases().filter((item) => item.id !== id));
+}
+
+function deleteCanvasSnapshot(canvasId) {
+  const endpoint = syncEndpointForCanvas('/sync', canvasId);
+  if (!endpoint) return;
+  fetch(endpoint, {
+    method: 'POST',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: crypto.randomUUID(),
+      type: 'state-store',
+      source: clientId,
+      payload: null,
+      sentAt: Date.now(),
+      seq: ++localMessageSeq,
+    }),
+  }).catch(() => {
+    // The local recent file is still removed; this only clears live server memory.
+  });
+}
+
+function deleteCanvas(canvasId, title) {
+  const id = normalizeCanvasId(canvasId);
+  const label = title || fallbackCanvasTitle(id);
+  if (!window.confirm(`'${label}' 캔버스를 삭제할까요?`)) return;
+  forgetCanvas(id);
+  deleteCanvasSnapshot(id);
+  if (!isHomeRoute() && id === activeCanvasId) {
+    window.location.href = homeUrl();
+    return;
+  }
+  renderRecentCanvases();
+}
+
+function renameCanvas() {
+  if (isHomeRoute()) return;
+  const currentTitle = canvasTitle(activeCanvasId);
+  const nextTitle = window.prompt('캔버스 이름을 입력하세요.', currentTitle);
+  if (nextTitle === null) return;
+  const trimmed = nextTitle.trim();
+  if (!trimmed || trimmed === currentTitle) return;
+  rememberCanvas(activeCanvasId, { title: trimmed });
+  if (canvasMeta) {
+    canvasMeta.textContent = trimmed;
+    canvasMeta.setAttribute('aria-label', `${trimmed} 이름 수정`);
+  }
+  renderRecentCanvases();
 }
 
 function formatRecentTime(timestamp) {
@@ -489,11 +546,14 @@ function renderRecentCanvases() {
   items.forEach((item) => {
     const id = normalizeCanvasId(item.id);
     const isCurrent = hasOpenCanvas && id === activeCanvasId;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = isCurrent ? 'recent-canvas-item is-current' : 'recent-canvas-item';
-    button.dataset.canvasId = id;
-    if (isCurrent) button.setAttribute('aria-current', 'true');
+    const card = document.createElement('div');
+    card.className = isCurrent ? 'recent-canvas-item is-current' : 'recent-canvas-item';
+    card.dataset.canvasId = id;
+
+    const openButton = document.createElement('button');
+    openButton.type = 'button';
+    openButton.className = 'recent-canvas-open';
+    if (isCurrent) openButton.setAttribute('aria-current', 'true');
 
     const preview = createRecentCanvasPreview(item.preview);
 
@@ -512,15 +572,26 @@ function renderRecentCanvases() {
     const text = document.createElement('div');
     text.className = 'recent-canvas-main';
     text.append(label, meta);
-    button.append(preview, text, action);
-    button.addEventListener('click', () => {
+    openButton.append(preview, text, action);
+    openButton.addEventListener('click', () => {
       if (isCurrent) {
         closeHome();
       } else {
         window.location.href = canvasUrl(id);
       }
     });
-    recentCanvasList.appendChild(button);
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'recent-canvas-delete';
+    deleteButton.textContent = '삭제';
+    deleteButton.setAttribute('aria-label', `${item.title || fallbackCanvasTitle(id)} 삭제`);
+    deleteButton.addEventListener('click', () => {
+      deleteCanvas(id, item.title || fallbackCanvasTitle(id));
+    });
+
+    card.append(openButton, deleteButton);
+    recentCanvasList.appendChild(card);
   });
 }
 
@@ -556,12 +627,12 @@ function initializeCanvasHome() {
 
   if (canvasMeta) {
     canvasMeta.textContent = canvasTitle(activeCanvasId);
-    canvasMeta.title = '홈으로 이동';
-    canvasMeta.setAttribute('aria-label', `${canvasTitle(activeCanvasId)}에서 홈으로 이동`);
+    canvasMeta.title = '캔버스 이름 수정';
+    canvasMeta.setAttribute('aria-label', `${canvasTitle(activeCanvasId)} 이름 수정`);
   }
   if (!homeRoute) rememberCanvas(activeCanvasId);
   renderRecentCanvases();
-  canvasMeta?.addEventListener('click', goHome);
+  canvasMeta?.addEventListener('click', renameCanvas);
   homeButton?.addEventListener('click', goHome);
   newCanvasButton?.addEventListener('click', createNewCanvas);
   homeReturnButton?.addEventListener('click', closeHome);

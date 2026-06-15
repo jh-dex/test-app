@@ -143,6 +143,12 @@ h3 {
   cursor: pointer;
 }
 
+.canvas-meta:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+}
+
 .topbar-button {
   padding: 5px 10px;
   cursor: pointer;
@@ -288,6 +294,9 @@ body.is-home-route .home-return-button {
 
 .recent-canvas-item {
   position: relative;
+}
+
+.recent-canvas-open {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
@@ -302,12 +311,12 @@ body.is-home-route .home-return-button {
   cursor: pointer;
 }
 
-.recent-canvas-item.is-current {
+.recent-canvas-item.is-current .recent-canvas-open {
   border-color: rgba(59, 130, 246, 0.55);
   background: rgba(59, 130, 246, 0.12);
 }
 
-.recent-canvas-item:hover {
+.recent-canvas-open:hover {
   border-color: var(--border-strong);
   background: var(--bg-surface-2);
 }
@@ -345,25 +354,6 @@ body.is-home-route .home-return-button {
     linear-gradient(90deg, var(--board-line) 1px, transparent 1px),
     #f7f8f8;
   background-size: 18px 18px;
-}
-
-.recent-canvas-preview.is-empty::before,
-.recent-canvas-preview.is-empty::after {
-  content: '';
-  position: absolute;
-  left: 26%;
-  right: 26%;
-  height: 2px;
-  border-radius: var(--radius-pill);
-  background: #d1d5db;
-}
-
-.recent-canvas-preview.is-empty::before {
-  top: 42%;
-}
-
-.recent-canvas-preview.is-empty::after {
-  top: 55%;
 }
 
 .preview-shape {
@@ -410,7 +400,7 @@ body.is-home-route .home-return-button {
 .recent-canvas-action {
   position: absolute;
   top: var(--space-3);
-  right: var(--space-3);
+  left: var(--space-3);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 590;
@@ -421,6 +411,28 @@ body.is-home-route .home-return-button {
   background: rgba(255, 255, 255, 0.82);
   color: #111827;
   backdrop-filter: blur(6px);
+}
+
+.recent-canvas-delete {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 1;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.82);
+  color: #374151;
+  font-size: 12px;
+  font-weight: 590;
+  backdrop-filter: blur(6px);
+}
+
+.recent-canvas-delete:hover {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: #fff;
+  color: #b91c1c;
 }
 
 .recent-canvas-empty {
