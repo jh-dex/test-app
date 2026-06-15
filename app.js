@@ -5,6 +5,11 @@ const seenMessageOrder = [];
 const SEEN_MESSAGE_LIMIT = 4000;
 let localMessageSeq = 0;
 const boardStateBarriers = new Map();
+// Per-object ordering guard: objectId -> { seq, source }. Lets us drop only the
+// out-of-order (older-seq) messages that come from the SAME source for the same
+// object (e.g. a stroke-end arriving after that stroke's undo stroke-remove),
+// without touching concurrent edits made by OTHER clients.
+const objectOpSeq = new Map();
 const channel =
   typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(BROADCAST_CHANNEL_NAME) : null;
 
@@ -668,6 +673,42 @@ function isOlderThanBoardStateBarrier(message) {
     return seq < barrier.seq;
   }
   return Number(message.sentAt || 0) < barrier.sentAt;
+}
+
+// Object-scoped commit/remove messages that must be applied in send order
+// (per source, per object) so a reordered older message can't resurrect or
+// stale-overwrite an object that the same client has since changed/removed.
+const GUARDED_OBJECT_OPS = new Set([
+  'stroke-start',
+  'stroke-append',
+  'stroke-end',
+  'stroke-remove',
+  'image-update',
+  'image-remove',
+  'text-update',
+  'text-remove',
+  'compare-update',
+  'compare-remove',
+]);
+
+function isStaleObjectOp(message) {
+  const id = message?.payload?.id;
+  const seq = Number.isFinite(Number(message?.seq)) ? Number(message.seq) : null;
+  if (id == null || seq === null || !message.source) return false;
+  const current = objectOpSeq.get(id);
+  // Only drop messages from the SAME source that arrive out of order.
+  // Cross-source edits are left to last-arrival-wins (unchanged behaviour).
+  return Boolean(current && current.source === message.source && seq < current.seq);
+}
+
+function noteObjectOp(message) {
+  const id = message?.payload?.id;
+  const seq = Number.isFinite(Number(message?.seq)) ? Number(message.seq) : null;
+  if (id == null || seq === null || !message.source) return;
+  const current = objectOpSeq.get(id);
+  if (!current || current.source !== message.source || seq >= current.seq) {
+    objectOpSeq.set(id, { seq, source: message.source });
+  }
 }
 
 function syncPresence() {
@@ -1426,11 +1467,92 @@ function recordCurrentStateInHistory() {
   appendHistorySnapshot(snapshotBoardState());
 }
 
+// Undo/redo broadcasts only what actually changed (a diff against the live
+// board), NOT a full board-state snapshot. A full snapshot is built from the
+// actor's local view and would overwrite peers' concurrent edits it hasn't
+// merged yet, permanently desyncing the boards. A diff touches only the objects
+// this undo/redo changed, so concurrent edits to OTHER objects survive and the
+// boards converge. (The server still keeps a full snapshot for late joiners.)
+function broadcastBoardDiff(before, after) {
+  const byId = (arr) => {
+    const map = new Map();
+    (arr || []).forEach((obj) => {
+      if (obj && obj.id != null) map.set(obj.id, obj);
+    });
+    return map;
+  };
+  const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  // Strokes (pen): add/replace changed, remove the gone.
+  const beforeStrokes = byId(before.drawingOps);
+  const afterStrokes = byId(after.drawingOps);
+  afterStrokes.forEach((stroke, id) => {
+    const prev = beforeStrokes.get(id);
+    if (!prev || !sameJson(prev, stroke)) {
+      broadcast('stroke-end', {
+        id: stroke.id,
+        color: stroke.color,
+        size: stroke.size,
+        tool: stroke.tool,
+        points: (stroke.points || []).map((point) => ({ ...point })),
+      });
+    }
+  });
+  beforeStrokes.forEach((_stroke, id) => {
+    if (!afterStrokes.has(id)) broadcast('stroke-remove', { id });
+  });
+
+  // Images: z-order is derived from DOM order, so compare content without z and
+  // fix ordering separately via image-order.
+  const beforeImg = byId(before.images);
+  const afterImg = byId(after.images);
+  const imgContentEq = (a, b) =>
+    a.src === b.src && a.x === b.x && a.y === b.y && a.width === b.width;
+  afterImg.forEach((img, id) => {
+    const prev = beforeImg.get(id);
+    if (!prev || !imgContentEq(prev, img)) broadcast('image-update', { ...img });
+  });
+  beforeImg.forEach((_img, id) => {
+    if (!afterImg.has(id)) broadcast('image-remove', { id });
+  });
+  const beforeOrder = (before.images || []).map((img) => img.id).join(',');
+  const afterOrder = (after.images || []).map((img) => img.id).join(',');
+  if (beforeOrder !== afterOrder && afterImg.size > 0) {
+    broadcast('image-order', { order: (after.images || []).map((img) => img.id) });
+  }
+
+  // Texts.
+  const beforeText = byId(before.texts);
+  const afterText = byId(after.texts);
+  afterText.forEach((text, id) => {
+    const prev = beforeText.get(id);
+    if (!prev || !sameJson(prev, text)) broadcast('text-update', { ...text });
+  });
+  beforeText.forEach((_text, id) => {
+    if (!afterText.has(id)) broadcast('text-remove', { id });
+  });
+
+  // Compares.
+  const beforeCmp = byId(before.compares);
+  const afterCmp = byId(after.compares);
+  afterCmp.forEach((cmp, id) => {
+    const prev = beforeCmp.get(id);
+    if (!prev || !sameJson(prev, cmp)) broadcast('compare-update', { ...cmp });
+  });
+  beforeCmp.forEach((_cmp, id) => {
+    if (!afterCmp.has(id)) broadcast('compare-remove', { id });
+  });
+}
+
 function restoreBoardState(state, { broadcastRestore = false, recordHistory = false } = {}) {
   if (!state) return;
   const images = Array.isArray(state.images) ? state.images : [];
   const texts = Array.isArray(state.texts) ? state.texts : [];
   const compares = Array.isArray(state.compares) ? state.compares : [];
+
+  // Snapshot the live board BEFORE mutating it, so an undo/redo can broadcast a
+  // precise diff (only what changed) instead of a clobbering full snapshot.
+  const before = broadcastRestore ? snapshotBoardState() : null;
 
   isRestoringHistory = true;
   liveStrokes.clear();
@@ -1466,8 +1588,9 @@ function restoreBoardState(state, { broadcastRestore = false, recordHistory = fa
   }
 
   if (broadcastRestore) {
-    // Live peers get the new state immediately...
-    broadcast('board-state', restoredSnapshot);
+    // Live peers get only the objects this undo/redo changed (so their own
+    // concurrent edits to other objects are preserved)...
+    broadcastBoardDiff(before, restoredSnapshot);
     // ...and the server's stored snapshot is updated too, so a refresh or a
     // late joiner also sees the result of this undo/redo.
     scheduleStateSync();
@@ -2967,6 +3090,13 @@ function handleRealtimeMessage(message) {
   const { type, source, payload } = message;
   if (source === clientId) return;
   if (isOlderThanBoardStateBarrier(message)) return;
+  // Per-object send-order guard: drop a same-source message that arrives after a
+  // newer one for the same object (prevents a reordered stroke-end from undoing
+  // an undo's stroke-remove, etc.). Record the seq for ops we will apply.
+  if (GUARDED_OBJECT_OPS.has(type)) {
+    if (isStaleObjectOp(message)) return;
+    noteObjectOp(message);
+  }
   const isTransient = payload?.transient === true;
   let shouldRecordRemoteHistory = false;
 
@@ -3014,6 +3144,13 @@ function handleRealtimeMessage(message) {
       renderStroke(finalStroke);
       shouldRecordRemoteHistory = true;
     }
+  }
+  if (type === 'stroke-remove' && payload?.id) {
+    // A peer's undo/redo removed this stroke. Drop it locally too.
+    removeStrokePath(payload.id);
+    drawingOps = drawingOps.filter((stroke) => stroke.id !== payload.id);
+    liveStrokes.delete(payload.id);
+    shouldRecordRemoteHistory = true;
   }
   if (type === 'draw' && payload?.from && payload?.to) {
     const fallbackStroke = {
