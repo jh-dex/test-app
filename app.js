@@ -1821,15 +1821,38 @@ function applyCompareLayout(item) {
   const split = clamp(Number(item.dataset.split || 0.5), 0, 1);
   item.style.width = `${W}px`;
   item.style.height = `${H}px`;
+  const base = item.querySelector('.compare-base');
   const top = item.querySelector('.compare-top');
   const clip = item.querySelector('.compare-clip');
   const divider = item.querySelector('.compare-divider');
+  // Size BOTH images to the exact same box so A (top) and B (base) scale and
+  // crop identically with object-fit: cover and line up. Previously only the
+  // top was set to W/H while the base filled the slightly smaller inner frame
+  // (W/H minus the 2px item border) via 100%/100%, so the two pictures ended up
+  // a couple px different in height/width and looked vertically offset.
+  if (base) {
+    base.style.width = `${W}px`;
+    base.style.height = `${H}px`;
+  }
   if (top) {
     top.style.width = `${W}px`;
     top.style.height = `${H}px`;
   }
   if (clip) clip.style.width = `${split * W}px`;
   if (divider) divider.style.left = `${split * W}px`;
+}
+
+// Snap a compare box fully to one side: split=1 shows only image A (the left/
+// "first" picture), split=0 shows only image B (the right/"second"). Used by the
+// 1 / 2 shortcuts while a compare is selected. Syncs to peers and is undoable.
+function setCompareSplit(item, split) {
+  if (!item) return;
+  const next = clamp(Number(split), 0, 1);
+  if (Number(item.dataset.split) === next) return;
+  item.dataset.split = String(next);
+  applyCompareLayout(item);
+  broadcast('compare-update', getComparePayload(item.dataset.id));
+  pushHistory('compare-split');
 }
 
 function placeCompare(payload, { silent = false } = {}) {
@@ -3363,6 +3386,15 @@ window.addEventListener('keydown', (event) => {
       event.preventDefault();
       setTool('eraser');
       return;
+    }
+    // 1 / 2: when a single compare box is selected, wipe it fully to image A / B.
+    if ((loweredKey === '1' || loweredKey === '2') && selectedIds.size === 1) {
+      const cmp = getCompareItem([...selectedIds][0]);
+      if (cmp) {
+        event.preventDefault();
+        setCompareSplit(cmp, loweredKey === '1' ? 1 : 0);
+        return;
+      }
     }
   }
 
