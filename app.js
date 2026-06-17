@@ -1794,6 +1794,9 @@ function updateTextInteractivity() {
 }
 
 // --- Image compare (before/after wipe) -------------------------------------
+// Matches the 2px solid border on .compare-item in styles.css. The frame's
+// inner width is `width - 2*COMPARE_BORDER`, which the split math relies on.
+const COMPARE_BORDER = 2;
 function getCompareItem(id) {
   return compareLayer.querySelector(`.compare-item[data-id="${id}"]`);
 }
@@ -1825,11 +1828,14 @@ function applyCompareLayout(item) {
   const clip = item.querySelector('.compare-clip');
   const divider = item.querySelector('.compare-divider');
   if (top) {
-    top.style.width = `${W}px`;
-    top.style.height = `${H}px`;
+    top.style.width = '100%';
+    top.style.height = '100%';
   }
-  if (clip) clip.style.width = `${split * W}px`;
-  if (divider) divider.style.left = `${split * W}px`;
+  // Use percentages so the split tracks the .compare-frame's inner width
+  // (W - 2*border). Using `split * W` pushed the divider past the right
+  // edge by the border width and made far-left vs far-right asymmetric.
+  if (clip) clip.style.width = `${split * 100}%`;
+  if (divider) divider.style.left = `${split * 100}%`;
 }
 
 function placeCompare(payload, { silent = false } = {}) {
@@ -1859,7 +1865,7 @@ function placeCompare(payload, { silent = false } = {}) {
     const handle = document.createElement('div');
     handle.className = 'compare-handle';
     handle.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8l-3 4 3 4"/><path d="M13 8l3 4-3 4"/></svg>';
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 8l-4 4 4 4"/><path d="M14 8l4 4-4 4"/></svg>';
     divider.appendChild(handle);
 
     const frame = document.createElement('div');
@@ -3060,7 +3066,11 @@ function pointerMove(event) {
       const cmp = getCompareItem(interaction.id);
       if (cmp) {
         const W = Number(cmp.dataset.width || 1);
-        const split = clamp((world.x - Number(cmp.dataset.x || 0)) / W, 0, 1);
+        // .compare-item has a 2px border (box-sizing: border-box), so the
+        // frame is W-4 wide and inset 2px from the item's outer-left.
+        const innerW = Math.max(1, W - COMPARE_BORDER * 2);
+        const localX = world.x - Number(cmp.dataset.x || 0) - COMPARE_BORDER;
+        const split = clamp(localX / innerW, 0, 1);
         cmp.dataset.split = String(split);
         applyCompareLayout(cmp);
         if (dragSyncDue()) liveBroadcast(interaction.id);
