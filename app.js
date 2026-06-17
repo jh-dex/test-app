@@ -1827,13 +1827,18 @@ function applyCompareLayout(item) {
   const top = item.querySelector('.compare-top');
   const clip = item.querySelector('.compare-clip');
   const divider = item.querySelector('.compare-divider');
+  // .compare-top lives inside .compare-clip, so '100%' would shrink with the
+  // clip and squash the top image. Pin it to the frame's inner size in px so
+  // the clip just reveals a window onto a full-size image.
+  const innerW = Math.max(0, W - COMPARE_BORDER * 2);
+  const innerH = Math.max(0, H - COMPARE_BORDER * 2);
   if (top) {
-    top.style.width = '100%';
-    top.style.height = '100%';
+    top.style.width = `${innerW}px`;
+    top.style.height = `${innerH}px`;
   }
-  // Use percentages so the split tracks the .compare-frame's inner width
-  // (W - 2*border). Using `split * W` pushed the divider past the right
-  // edge by the border width and made far-left vs far-right asymmetric.
+  // clip and divider are direct children of .compare-frame, so % tracks the
+  // frame's inner width (W - 2*border). Using `split * W` pushed the divider
+  // past the right edge by the border width and made the ends asymmetric.
   if (clip) clip.style.width = `${split * 100}%`;
   if (divider) divider.style.left = `${split * 100}%`;
 }
