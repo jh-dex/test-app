@@ -1824,23 +1824,41 @@ function applyCompareLayout(item) {
   const split = clamp(Number(item.dataset.split || 0.5), 0, 1);
   item.style.width = `${W}px`;
   item.style.height = `${H}px`;
+  const base = item.querySelector('.compare-base');
   const top = item.querySelector('.compare-top');
   const clip = item.querySelector('.compare-clip');
   const divider = item.querySelector('.compare-divider');
-  // .compare-top lives inside .compare-clip, so '100%' would shrink with the
-  // clip and squash the top image. Pin it to the frame's inner size in px so
-  // the clip just reveals a window onto a full-size image.
-  const innerW = Math.max(0, W - COMPARE_BORDER * 2);
-  const innerH = Math.max(0, H - COMPARE_BORDER * 2);
+  // Size BOTH images to the exact same box so A (top) and B (base) scale and
+  // crop identically with object-fit: cover and line up. (base filling the
+  // slightly smaller inner frame via 100%/100% while top used W/H left them a
+  // couple px apart and looked vertically offset.)
+  if (base) {
+    base.style.width = `${W}px`;
+    base.style.height = `${H}px`;
+  }
   if (top) {
-    top.style.width = `${innerW}px`;
-    top.style.height = `${innerH}px`;
+    top.style.width = `${W}px`;
+    top.style.height = `${H}px`;
   }
   // clip and divider are direct children of .compare-frame, so % tracks the
   // frame's inner width (W - 2*border). Using `split * W` pushed the divider
-  // past the right edge by the border width and made the ends asymmetric.
+  // past the right inner edge by the border width and made the far-left vs
+  // far-right ends asymmetric.
   if (clip) clip.style.width = `${split * 100}%`;
   if (divider) divider.style.left = `${split * 100}%`;
+}
+
+// Snap a compare box fully to one side: split=1 shows only image A (the left/
+// "first" picture), split=0 shows only image B (the right/"second"). Used by the
+// 1 / 2 shortcuts while a compare is selected. Syncs to peers and is undoable.
+function setCompareSplit(item, split) {
+  if (!item) return;
+  const next = clamp(Number(split), 0, 1);
+  if (Number(item.dataset.split) === next) return;
+  item.dataset.split = String(next);
+  applyCompareLayout(item);
+  broadcast('compare-update', getComparePayload(item.dataset.id));
+  pushHistory('compare-split');
 }
 
 function placeCompare(payload, { silent = false } = {}) {
@@ -3378,6 +3396,15 @@ window.addEventListener('keydown', (event) => {
       event.preventDefault();
       setTool('eraser');
       return;
+    }
+    // 1 / 2: when a single compare box is selected, wipe it fully to image A / B.
+    if ((loweredKey === '1' || loweredKey === '2') && selectedIds.size === 1) {
+      const cmp = getCompareItem([...selectedIds][0]);
+      if (cmp) {
+        event.preventDefault();
+        setCompareSplit(cmp, loweredKey === '1' ? 1 : 0);
+        return;
+      }
     }
   }
 
